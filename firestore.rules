@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to get user role
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    
+    // Helper function to check if user is admin
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+    
+    // Helper function to check if user is admin or marker
+    function isAdminOrMarker() {
+      return isAuthenticated() && (getUserRole() == 'admin' || getUserRole() == 'marker');
+    }
+    
+    // Users collection - stores user roles
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    
+    // Members collection
+    match /members/{memberId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdminOrMarker();
+      allow delete: if isAdmin();
+    }
+    
+    // Families collection
+    match /families/{familyId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdminOrMarker();
+      allow delete: if isAdmin();
+    }
+    
+    // Events collection
+    match /events/{eventId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdminOrMarker();
+      allow delete: if isAdmin();
+    }
+    
+    // Attendance collection
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdminOrMarker();
+      allow delete: if isAdminOrMarker(); // Markers must be able to undo attendance they marked
+    }
+    
+    // FollowUp collection
+    match /followups/{followupId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if isAdmin();
+    }
+    
+    // Teams collection (legacy)
+    match /teams/{teamId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    
+    // Team Groups collection (hierarchical teams)
+    match /team_groups/{groupId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    
+    // ==================== AUTOMATIONS ====================
+    
+    // WhatsApp Settings — Admin only
+    match /whatsapp_settings/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+    
+    // Automations configuration — Admin only
+    match /automations/{automationId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+    
+    // Automation Templates — Admin only
+    match /automation_templates/{templateId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+    
+    // Automation Logs — Admin read/write
+    match /automation_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false; // Logs are immutable
+    }
+    
+    // ==================== ANALYTICS EMAIL ====================
+    
+    // Analytics Email Settings — Admin only
+    match /analytics_email_settings/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+    
+    // Analytics Email Logs — Admin read, Cloud Functions write
+    match /analytics_email_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false; // Logs updated by Cloud Functions only
+    }
+  }
+}

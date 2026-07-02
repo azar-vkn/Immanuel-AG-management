@@ -1,0 +1,282 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Deep Navy Blue Theme - Dark Mode (Default) */
+    --background: 220 30% 8%;
+    --foreground: 45 30% 95%;
+
+    --card: 220 35% 12%;
+    --card-foreground: 45 30% 95%;
+
+    --popover: 220 35% 10%;
+    --popover-foreground: 45 30% 95%;
+
+    /* Rich Gold Primary */
+    --primary: 43 74% 49%;
+    --primary-foreground: 220 30% 8%;
+
+    /* Navy Secondary */
+    --secondary: 220 40% 18%;
+    --secondary-foreground: 45 30% 95%;
+
+    --muted: 220 25% 20%;
+    --muted-foreground: 220 15% 60%;
+
+    /* Gold Accent */
+    --accent: 43 74% 49%;
+    --accent-foreground: 220 30% 8%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 30% 20%;
+    --input: 220 30% 15%;
+    --ring: 43 74% 49%;
+
+    --radius: 0.75rem;
+
+    /* Custom Colors */
+    --gold: 43 74% 49%;
+    --gold-light: 43 80% 60%;
+    --gold-dark: 43 70% 35%;
+    --navy: 220 40% 15%;
+    --navy-light: 220 35% 25%;
+    --navy-dark: 220 45% 8%;
+    
+    /* Glass Effect */
+    --glass-bg: 220 40% 12% / 0.7;
+    --glass-border: 220 30% 30% / 0.3;
+    --glass-shadow: 220 50% 5% / 0.5;
+
+    /* Gradients */
+    --gradient-gold: linear-gradient(135deg, hsl(43 74% 49%), hsl(43 80% 60%));
+    --gradient-navy: linear-gradient(180deg, hsl(220 40% 15%), hsl(220 45% 8%));
+    --gradient-divine: linear-gradient(135deg, hsl(220 40% 12%), hsl(220 45% 6%), hsl(220 40% 10%));
+    --gradient-glass: linear-gradient(135deg, hsl(220 40% 15% / 0.8), hsl(220 45% 10% / 0.6));
+
+    /* Sidebar */
+    --sidebar-background: 220 40% 10%;
+    --sidebar-foreground: 45 30% 90%;
+    --sidebar-primary: 43 74% 49%;
+    --sidebar-primary-foreground: 220 30% 8%;
+    --sidebar-accent: 220 35% 18%;
+    --sidebar-accent-foreground: 45 30% 95%;
+    --sidebar-border: 220 30% 20%;
+    --sidebar-ring: 43 74% 49%;
+  }
+
+  /* Light Mode */
+  .light {
+    --background: 45 30% 98%;
+    --foreground: 220 40% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 40% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 40% 15%;
+
+    /* Rich Gold Primary - darker for light mode */
+    --primary: 43 74% 40%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Light Secondary */
+    --secondary: 220 20% 92%;
+    --secondary-foreground: 220 40% 15%;
+
+    --muted: 220 15% 90%;
+    --muted-foreground: 220 15% 40%;
+
+    /* Gold Accent */
+    --accent: 43 74% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 85%;
+    --input: 220 15% 92%;
+    --ring: 43 74% 45%;
+
+    /* Custom Colors */
+    --gold: 43 74% 40%;
+    --gold-light: 43 80% 50%;
+    --gold-dark: 43 70% 30%;
+    --navy: 220 40% 25%;
+    --navy-light: 220 35% 40%;
+    --navy-dark: 220 45% 15%;
+    
+    /* Glass Effect */
+    --glass-bg: 0 0% 100% / 0.9;
+    --glass-border: 220 15% 80% / 0.5;
+    --glass-shadow: 220 20% 70% / 0.2;
+
+    /* Sidebar */
+    --sidebar-background: 220 30% 97%;
+    --sidebar-foreground: 220 40% 15%;
+    --sidebar-primary: 43 74% 40%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 20% 92%;
+    --sidebar-accent-foreground: 220 40% 15%;
+    --sidebar-border: 220 15% 88%;
+    --sidebar-ring: 43 74% 45%;
+  }
+
+  .dark {
+    --background: 220 30% 8%;
+    --foreground: 45 30% 95%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Cinzel', serif;
+  }
+}
+
+@layer components {
+  /* Glass Morphism */
+  .glass {
+    @apply backdrop-blur-xl border border-border/30;
+    background: linear-gradient(135deg, 
+      hsl(var(--card) / 0.8), 
+      hsl(var(--card) / 0.6)
+    );
+    box-shadow: 
+      0 8px 32px hsl(var(--glass-shadow)),
+      inset 0 1px 0 hsl(45 30% 95% / 0.05);
+  }
+
+  .glass-gold {
+    @apply backdrop-blur-xl;
+    background: linear-gradient(135deg, 
+      hsl(var(--gold) / 0.15), 
+      hsl(var(--gold) / 0.05)
+    );
+    border: 1px solid hsl(var(--gold) / 0.3);
+    box-shadow: 
+      0 8px 32px hsl(var(--glass-shadow)),
+      inset 0 1px 0 hsl(var(--gold) / 0.1);
+  }
+
+  /* Divine Glow Effect */
+  .divine-glow {
+    box-shadow: 
+      0 0 30px hsl(var(--gold) / 0.2),
+      0 0 60px hsl(var(--gold) / 0.1);
+  }
+
+  .divine-glow-strong {
+    box-shadow: 
+      0 0 40px hsl(var(--gold) / 0.3),
+      0 0 80px hsl(var(--gold) / 0.15),
+      0 0 120px hsl(var(--gold) / 0.08);
+  }
+
+  /* Cross Symbol */
+  .cross-symbol {
+    @apply relative;
+    text-shadow: 0 0 30px hsl(var(--gold) / 0.5);
+  }
+
+  /* Gold Text Gradient */
+  .text-gold-gradient {
+    background: linear-gradient(135deg, 
+      hsl(var(--gold-light)), 
+      hsl(var(--gold)), 
+      hsl(var(--gold-light))
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Animated Background */
+  .divine-bg {
+    background: 
+      radial-gradient(ellipse at 20% 20%, hsl(var(--gold) / 0.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 80%, hsl(var(--gold) / 0.05) 0%, transparent 50%),
+      hsl(var(--background));
+  }
+
+  /* Card Hover Effect */
+  .card-hover {
+    @apply transition-all duration-300;
+  }
+
+  .card-hover:hover {
+    @apply -translate-y-1;
+    box-shadow: 
+      0 12px 40px hsl(var(--glass-shadow)),
+      0 0 20px hsl(var(--gold) / 0.1);
+  }
+
+  /* Status Badge Styles */
+  .badge-success {
+    @apply bg-emerald-500/20 text-emerald-400 border-emerald-500/30;
+  }
+
+  .badge-warning {
+    @apply bg-amber-500/20 text-amber-400 border-amber-500/30;
+  }
+
+  .badge-info {
+    @apply bg-blue-500/20 text-blue-400 border-blue-500/30;
+  }
+
+  /* Input Focus Gold Ring */
+  .input-gold:focus {
+    @apply ring-2 ring-primary/50 border-primary/50;
+  }
+}
+
+@layer utilities {
+  /* Animations */
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+
+  @keyframes pulse-gold {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animate-pulse-gold {
+    animation: pulse-gold 2s ease-in-out infinite;
+  }
+
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--gold) / 0) 0%,
+      hsl(var(--gold) / 0.3) 50%,
+      hsl(var(--gold) / 0) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 3s ease-in-out infinite;
+  }
+}

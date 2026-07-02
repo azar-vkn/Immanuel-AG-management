@@ -1,0 +1,33 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "automation_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "automationType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "automation_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
