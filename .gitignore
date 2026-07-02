@@ -26,3 +26,18 @@ dist-ssr
 # Environment variables
 .env
 functions/.env
+
+# Redundant lock files
+bun.lock
+bun.lockb
+
+# Build output
+functions/lib/
+
+# Cache directories
+.firebase/
+
+# Sensitive / Data files
+Google app pass For email automation.txt
+*.xlsx
+*.csv
