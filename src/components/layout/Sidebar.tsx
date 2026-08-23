@@ -3,7 +3,14 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { CrossIcon } from '@/components/CrossIcon';
 import { ThemeToggle } from '@/components/layout/ThemeToggle';
+import { SidebarClock } from '@/components/layout/SidebarClock';
 import { cn } from '@/lib/utils';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import {
   LayoutDashboard,
   Users,
@@ -17,7 +24,8 @@ import {
   ChevronLeft,
   Menu,
   MapPinned,
-  Zap
+  Zap,
+  ScanFace
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -32,6 +40,7 @@ const navItems = [
   { path: '/families', icon: UsersRound, label: 'Families', permission: 'families.view' },
   { path: '/events', icon: Calendar, label: 'Events', permission: 'events.view' },
   { path: '/attendance', icon: ClipboardCheck, label: 'Attendance', permission: 'attendance.view' },
+  { path: '/attendance/live', icon: ScanFace, label: 'Entrance Camera', permission: 'attendance.live.view' },
   { path: '/reports', icon: FileBarChart, label: 'Reports', permission: 'reports.view' },
   { path: '/follow-up', icon: Phone, label: 'Follow-Up', permission: 'followup.view' },
   { path: '/teams', icon: MapPinned, label: 'Teams', permission: 'teams.manage' },
@@ -90,18 +99,29 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
         <ul className="space-y-1">
           {visibleItems.map((item) => (
             <li key={item.path}>
-              <NavLink
-                to={item.path}
-                className={({ isActive }) => cn(
-                  'flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200',
-                  'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent',
-                  isActive && 'bg-sidebar-accent text-sidebar-primary font-medium',
-                  collapsed && 'justify-center'
-                )}
-              >
-                <item.icon className={cn('w-5 h-5 flex-shrink-0', collapsed && 'w-6 h-6')} />
-                {!collapsed && <span className="truncate">{item.label}</span>}
-              </NavLink>
+              <TooltipProvider delayDuration={0}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <NavLink
+                      to={item.path}
+                      className={({ isActive }) => cn(
+                        'flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 whitespace-nowrap overflow-hidden',
+                        'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent',
+                        isActive && 'bg-sidebar-accent text-sidebar-primary font-medium',
+                        collapsed && 'justify-center'
+                      )}
+                    >
+                      <item.icon className={cn('w-5 h-5 flex-shrink-0', collapsed && 'w-6 h-6')} />
+                      {!collapsed && <span className="truncate">{item.label}</span>}
+                    </NavLink>
+                  </TooltipTrigger>
+                  {collapsed && (
+                    <TooltipContent side="right" className="font-medium">
+                      {item.label}
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              </TooltipProvider>
             </li>
           ))}
         </ul>
@@ -118,17 +138,31 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
             <p className="text-xs text-muted-foreground capitalize">{user.role.replace('_', ' ')}</p>
           </div>
         )}
-        <Button
-          variant="ghost"
-          onClick={handleLogout}
-          className={cn(
-            'w-full justify-start gap-3 text-muted-foreground hover:text-destructive hover:bg-destructive/10',
-            collapsed && 'justify-center'
-          )}
-        >
-          <LogOut className="w-5 h-5" />
-          {!collapsed && 'Sign Out'}
-        </Button>
+        
+        <SidebarClock collapsed={collapsed} />
+
+        <TooltipProvider delayDuration={0}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                onClick={handleLogout}
+                className={cn(
+                  'w-full justify-start gap-3 text-muted-foreground hover:text-destructive hover:bg-destructive/10 whitespace-nowrap overflow-hidden',
+                  collapsed && 'justify-center'
+                )}
+              >
+                <LogOut className="w-5 h-5" />
+                {!collapsed && 'Sign Out'}
+              </Button>
+            </TooltipTrigger>
+            {collapsed && (
+              <TooltipContent side="right" className="font-medium">
+                Sign Out
+              </TooltipContent>
+            )}
+          </Tooltip>
+        </TooltipProvider>
       </div>
     </aside>
   );

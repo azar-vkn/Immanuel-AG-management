@@ -19,7 +19,6 @@ import {
   generateMessage,
   generatePersonalizedGreeting,
   openWhatsApp,
-  isEligibleForWhatsApp,
 } from '@/services/whatsappService';
 import { Member, Automation, AutomationLog, AutomationTemplate } from '@/types';
 import { TemplateEditor } from '@/components/automations/TemplateEditor';
@@ -53,6 +52,8 @@ import {
   Users,
   CheckCircle2,
   Copy,
+  MapPin,
+  UsersRound,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { format, formatDistanceToNow } from 'date-fns';
@@ -74,14 +75,47 @@ const CelebrationWishes: React.FC = () => {
   const [showTestDialog, setShowTestDialog] = useState(false);
   const [testPhone, setTestPhone] = useState('');
 
-  // Derived state
-  const todayBirthdays = getTodaysBirthdays(members).filter(isEligibleForWhatsApp);
-  const todayAnniversaries = getTodaysAnniversaries(members).filter(isEligibleForWhatsApp);
+  // Derived state — show ALL members with today's celebration (matching dashboard count)
+  const todayBirthdays = getTodaysBirthdays(members);
+  const todayAnniversaries = getTodaysAnniversaries(members);
   const upcomingBirthdays = getUpcomingBirthdays(members, 7);
   const upcomingAnniversaries = getUpcomingAnniversaries(members, 7);
   const currentTemplate = activeTab === 'birthday' ? birthdayTemplate : anniversaryTemplate;
   const currentTemplateBody = currentTemplate?.body || '';
   const todayMembers = activeTab === 'birthday' ? todayBirthdays : todayAnniversaries;
+
+  /**
+   * Resolve the effective phone number for a member.
+   * If the member has no phone, fall back to the family head's phone.
+   */
+  const getEffectivePhone = (member: Member): string => {
+    if (member.phone && member.phone.trim().length >= 10) {
+      return member.phone;
+    }
+    // Fall back to family head's phone
+    if (member.familyId && !member.isHeadOfFamily) {
+      const head = members.find(m => m.isHeadOfFamily && m.familyId === member.familyId);
+      if (head?.phone && head.phone.trim().length >= 10) {
+        return head.phone;
+      }
+    }
+    return member.phone; // return original (empty/short) so downstream checks still work
+  };
+
+  /**
+   * Check WhatsApp eligibility using the effective phone (own or family head's).
+   */
+  const isEligibleWithFallback = (member: Member): boolean => {
+    const effectivePhone = getEffectivePhone(member);
+    if (!effectivePhone || effectivePhone.trim().length < 10) return false;
+    if (member.whatsappEnabled === false) return false;
+    if (member.status === 'expired' || member.status === 'left') return false;
+    if (member.status === 'do_not_disturb') return false;
+    return true;
+  };
+
+  // Only WhatsApp-eligible members (own phone or family head's) can be sent messages
+  const sendableMembers = todayMembers.filter(isEligibleWithFallback);
   const upcomingMembers = activeTab === 'birthday' ? upcomingBirthdays : upcomingAnniversaries;
 
   useEffect(() => {
@@ -174,14 +208,15 @@ const CelebrationWishes: React.FC = () => {
   };
 
   const handleSendToMember = (member: Member) => {
+    const phone = getEffectivePhone(member);
     const message = generateMessage(currentTemplateBody, member, activeTab);
-    const success = openWhatsApp(member.phone, message);
+    const success = openWhatsApp(phone, message);
     if (success) {
       createAutomationLog({
         automationType: activeTab,
         memberId: member.id,
         memberName: member.name,
-        phone: member.phone,
+        phone,
         status: 'sent',
         sentAt: new Date().toISOString(),
       });
@@ -190,7 +225,7 @@ const CelebrationWishes: React.FC = () => {
   };
 
   const handleRunAll = async () => {
-    if (todayMembers.length === 0) {
+    if (sendableMembers.length === 0) {
       toast.info(`No eligible members for ${activeTab} wishes today`);
       return;
     }
@@ -199,25 +234,26 @@ const CelebrationWishes: React.FC = () => {
     let failedCount = 0;
 
     try {
-      for (const member of todayMembers) {
+      for (const member of sendableMembers) {
         const alreadySent = await hasAlreadySentToday(member.id, activeTab);
         if (alreadySent) {
           toast.info(`Already sent to ${member.name}, skipping`);
           continue;
         }
+        const phone = getEffectivePhone(member);
         const message = generateMessage(currentTemplateBody, member, activeTab);
-        const success = openWhatsApp(member.phone, message);
+        const success = openWhatsApp(phone, message);
         await createAutomationLog({
           automationType: activeTab,
           memberId: member.id,
           memberName: member.name,
-          phone: member.phone,
+          phone,
           status: success ? 'sent' : 'failed',
           sentAt: new Date().toISOString(),
         });
         if (success) sentCount++;
         else failedCount++;
-        if (todayMembers.indexOf(member) < todayMembers.length - 1) {
+        if (sendableMembers.indexOf(member) < sendableMembers.length - 1) {
           await new Promise((r) => setTimeout(r, 1500));
         }
       }
@@ -300,11 +336,11 @@ const CelebrationWishes: React.FC = () => {
           </Button>
           <Button
             onClick={handleRunAll}
-            disabled={running || todayMembers.length === 0}
+            disabled={running || sendableMembers.length === 0}
             className="gap-2"
           >
             {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-            Send All ({todayMembers.length})
+            Send All ({sendableMembers.length})
           </Button>
         </div>
       </div>
@@ -416,34 +452,74 @@ const CelebrationWishes: React.FC = () => {
                   )}>
                     {member.name.charAt(0)}
                   </div>
-                  <div>
+                  <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium">{member.name}</p>
-                    <p className="text-xs text-muted-foreground">{member.phone}</p>
+                    {(() => {
+                      const effectivePhone = getEffectivePhone(member);
+                      const isFromHead = effectivePhone && effectivePhone !== member.phone;
+                      return effectivePhone && effectivePhone.trim().length >= 10 ? (
+                        <p className="text-xs text-muted-foreground">
+                          {effectivePhone}
+                          {isFromHead && <span className="ml-1 text-[10px] text-amber-400/80">(head)</span>}
+                        </p>
+                      ) : null;
+                    })()}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">
+                      {member.address?.place && (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                          <MapPin className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate max-w-[140px]">{[member.address.place, member.address.city].filter(Boolean).join(', ')}</span>
+                        </span>
+                      )}
+                      {(() => {
+                        const head = member.isHeadOfFamily
+                          ? member
+                          : members.find(m => m.isHeadOfFamily && m.familyId === member.familyId);
+                        return head ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                            <Users className="w-3 h-3 flex-shrink-0" />
+                            <span className="truncate max-w-[120px]">{head.name}</span>
+                          </span>
+                        ) : null;
+                      })()}
+                      {member.fellowship && (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                          <UsersRound className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate max-w-[140px]">{member.fellowship}</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="gap-1.5 text-xs h-8 text-muted-foreground hover:text-foreground"
-                    onClick={() => handleCopyMessage(member)}
-                    title="Copy message"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    Copy
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={cn(
-                      'gap-1.5 text-xs h-8',
-                      activeTab === 'birthday' ? 'hover:text-pink-400' : 'hover:text-rose-400'
-                    )}
-                    onClick={() => handleSendToMember(member)}
-                  >
-                    <MessageCircle className="w-3.5 h-3.5" />
-                    Send via wa.me
-                  </Button>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {isEligibleWithFallback(member) ? (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="gap-1.5 text-xs h-8 text-muted-foreground hover:text-foreground"
+                        onClick={() => handleCopyMessage(member)}
+                        title="Copy message"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Copy
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={cn(
+                          'gap-1.5 text-xs h-8',
+                          activeTab === 'birthday' ? 'hover:text-pink-400' : 'hover:text-rose-400'
+                        )}
+                        onClick={() => handleSendToMember(member)}
+                      >
+                        <MessageCircle className="w-3.5 h-3.5" />
+                        Send via wa.me
+                      </Button>
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground/60 italic px-2">No phone</span>
+                  )}
                 </div>
               </div>
             ))}
@@ -484,6 +560,20 @@ const CelebrationWishes: React.FC = () => {
                       {thisYear ? format(thisYear, 'MMM dd') : '—'}
                       {thisYear ? ` (${formatDistanceToNow(thisYear, { addSuffix: false })})` : ''}
                     </p>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0 mt-0.5">
+                      {member.address?.place && (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground/70">
+                          <MapPin className="w-2.5 h-2.5" />
+                          {[member.address.place, member.address.city].filter(Boolean).join(', ')}
+                        </span>
+                      )}
+                      {member.fellowship && (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground/70">
+                          <UsersRound className="w-2.5 h-2.5" />
+                          {member.fellowship}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               );

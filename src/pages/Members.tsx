@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import { parse, isValid } from 'date-fns';
 import { getMembers, createMember, updateMember, deleteMember } from '@/services/firestore';
@@ -50,12 +50,17 @@ import {
   Loader2,
   ChevronDown,
   ChevronRight,
-  Users
+  Users,
+  ScanFace
 } from 'lucide-react';
 import { MemberForm } from '@/components/members/MemberForm';
 import { MemberIDCard } from '@/components/members/MemberIDCard';
 import { MemberViewDialog } from '@/components/members/MemberViewDialog';
 import { ImportMapperDialog } from '@/components/members/ImportMapperDialog';
+const FaceRegistrationDialog = React.lazy(() =>
+  import('@/components/members/FaceRegistrationDialog').then(m => ({ default: m.FaceRegistrationDialog }))
+);
+import { getRegisteredFaceIds } from '@/services/faceService';
 import { toast } from 'sonner';
 
 interface Filters {
@@ -77,6 +82,8 @@ const Members: React.FC = () => {
   const [showIdCard, setShowIdCard] = useState(false);
   const [showViewDialog, setShowViewDialog] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
+  const [showFaceDialog, setShowFaceDialog] = useState(false);
+  const [registeredFaceIds, setRegisteredFaceIds] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState<Filters>({
     team: '',
     gender: '',
@@ -113,6 +120,20 @@ const Members: React.FC = () => {
     };
     fetchMembers();
   }, []);
+
+  // Which members already have face data, for the row status colour
+  const refreshFaceIds = useCallback(async () => {
+    if (!hasPermission('face.register')) return;
+    try {
+      setRegisteredFaceIds(await getRegisteredFaceIds());
+    } catch (error) {
+      console.error('Error loading face registrations:', error);
+    }
+  }, [hasPermission]);
+
+  useEffect(() => {
+    refreshFaceIds();
+  }, [refreshFaceIds]);
 
   // Get unique teams from members or fallback to static sub-teams
   const memberTeams = useMemo(() => {
@@ -250,6 +271,7 @@ const Members: React.FC = () => {
   };
 
   const canEdit = hasPermission('members.edit');
+  const canRegisterFace = hasPermission('face.register');
   const canDelete = hasPermission('members.delete');
   const canCreate = hasPermission('members.create');
 
@@ -811,6 +833,20 @@ const Members: React.FC = () => {
                           >
                             <CreditCard className="w-4 h-4" />
                           </Button>
+                          {canRegisterFace && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title={registeredFaceIds.has(family.head.id) ? 'Face registered — update' : 'Register face'}
+                              className={`h-8 w-8 ${registeredFaceIds.has(family.head.id) ? 'text-emerald-400 hover:text-emerald-300' : 'text-muted-foreground hover:text-primary'}`}
+                              onClick={() => {
+                                setSelectedMember(family.head);
+                                setShowFaceDialog(true);
+                              }}
+                            >
+                              <ScanFace className="w-4 h-4" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -888,6 +924,20 @@ const Members: React.FC = () => {
                               >
                                 <CreditCard className="w-4 h-4" />
                               </Button>
+                              {canRegisterFace && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  title={registeredFaceIds.has(member.id) ? 'Face registered — update' : 'Register face'}
+                                  className={`h-8 w-8 ${registeredFaceIds.has(member.id) ? 'text-emerald-400 hover:text-emerald-300' : 'text-muted-foreground hover:text-primary'}`}
+                                  onClick={() => {
+                                    setSelectedMember(member);
+                                    setShowFaceDialog(true);
+                                  }}
+                                >
+                                  <ScanFace className="w-4 h-4" />
+                                </Button>
+                              )}
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -944,6 +994,19 @@ const Members: React.FC = () => {
         open={showViewDialog}
         onOpenChange={setShowViewDialog}
       />
+
+      {/* Face Registration Dialog — mounted on demand so the face recognition
+          bundle is only downloaded when it is actually used. */}
+      {showFaceDialog && (
+        <React.Suspense fallback={null}>
+          <FaceRegistrationDialog
+            member={selectedMember}
+            open={showFaceDialog}
+            onOpenChange={setShowFaceDialog}
+            onRegistered={refreshFaceIds}
+          />
+        </React.Suspense>
+      )}
 
       {/* Edit Dialog */}
       <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>

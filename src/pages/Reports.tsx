@@ -30,6 +30,17 @@ import { CelebrationReport } from '@/components/reports/CelebrationReport';
 import { OverallMemberReport } from '@/components/reports/OverallMemberReport';
 import { useTeams } from '@/contexts/TeamContext';
 
+const getMemberFellowship = (member: Member): string => {
+  if (member.fellowship) return member.fellowship;
+  const age = member.dob ? differenceInYears(new Date(), new Date(member.dob)) : 0;
+  if (age < 13) return 'Children';
+  const isMarried = member.maritalStatus === 'married';
+  if (!isMarried && age < 40) {
+    return member.gender === 'male' ? 'Youth Boys Fellowship' : 'Youth Girls Fellowship';
+  }
+  return member.gender === 'male' ? "Men's Fellowship" : "Women's Fellowship";
+};
+
 const Reports: React.FC = () => {
   const { teamGroups: teamStructure } = useTeams();
   const [events, setEvents] = useState<ChurchEvent[]>([]);
@@ -40,6 +51,7 @@ const Reports: React.FC = () => {
   const [reportType, setReportType] = useState<'present' | 'absent' | 'all'>('all');
   const [memberStatusFilter, setMemberStatusFilter] = useState<Member['status'] | 'all'>('all');
   const [teamFilter, setTeamFilter] = useState<string>('all');
+  const [fellowshipFilter, setFellowshipFilter] = useState<string>('all');
 
   // Fetch data from Firestore
   useEffect(() => {
@@ -53,6 +65,10 @@ const Reports: React.FC = () => {
         setEvents(eventsData);
         setMembers(membersData);
         setAttendance(attendanceData);
+        // Auto-select the most recent event (events are sorted by date desc)
+        if (eventsData.length > 0) {
+          setSelectedEventId(eventsData[0].id);
+        }
       } catch (error) {
         console.error('Error fetching data:', error);
         toast.error('Failed to load data');
@@ -91,22 +107,11 @@ const Reports: React.FC = () => {
         }
       }
       
-      const age = m.dob ? differenceInYears(new Date(), new Date(m.dob)) : 0;
-      let memberFellowship = m.fellowship;
-      if (!memberFellowship) {
-        if (age < 13) memberFellowship = 'Children';
-        else {
-          const isMarried = m.maritalStatus === 'married';
-          if (!isMarried && age < 40) {
-            memberFellowship = m.gender === 'male' ? 'Youth Boys Fellowship' : 'Youth Girls Fellowship';
-          } else {
-            memberFellowship = m.gender === 'male' ? "Men's Fellowship" : "Women's Fellowship";
-          }
-        }
-      }
+      const memberFellowship = getMemberFellowship(m);
+      if (fellowshipFilter !== 'all' && memberFellowship !== fellowshipFilter) return false;
       return eventFellowships.includes(memberFellowship as FellowshipType);
     });
-  }, [selectedEvent, members, memberStatusFilter, teamFilter]);
+  }, [selectedEvent, members, memberStatusFilter, teamFilter, fellowshipFilter]);
 
   const reportData = useMemo(() => {
     if (!selectedEventId) return [];
@@ -115,21 +120,28 @@ const Reports: React.FC = () => {
       attendance.filter(a => a.eventId === selectedEventId).map(a => a.memberId)
     );
 
+    let baseMembers = [];
     switch (reportType) {
       case 'present':
-        return eligibleMembers.filter(m => eventAttendanceIds.has(m.id));
+        baseMembers = eligibleMembers.filter(m => eventAttendanceIds.has(m.id));
+        break;
       case 'absent':
-        return eligibleMembers.filter(m => !eventAttendanceIds.has(m.id));
+        baseMembers = eligibleMembers.filter(m => !eventAttendanceIds.has(m.id));
+        break;
       default:
-        return eligibleMembers.map(m => ({
-          ...m,
-          isPresent: eventAttendanceIds.has(m.id)
-        }));
+        baseMembers = eligibleMembers;
+        break;
     }
+
+    return baseMembers.map(m => ({
+      ...m,
+      isPresent: eventAttendanceIds.has(m.id),
+      derivedFellowship: getMemberFellowship(m)
+    }));
   }, [selectedEventId, reportType, eligibleMembers, attendance]);
 
   const handleExport = () => {
-    const headers = ['Member ID', 'Name', 'Tamil Name', 'Phone', 'Tamil Place', 'Tamil City', 'Team', 'Member Status', 'Attendance', 'Report'];
+    const headers = ['Member ID', 'Name', 'Tamil Name', 'Phone', 'Tamil Place', 'Tamil City', 'Team', 'Fellowship', 'Member Status', 'Attendance', 'Report'];
     const rows = reportData.map(m => [
       m.memberId,
       m.name,
@@ -138,6 +150,7 @@ const Reports: React.FC = () => {
       m.tamilAddress?.place || (m.address?.place ? transliterateToTamil(m.address.place) : ''),
       m.tamilAddress?.city || (m.address?.city ? transliterateToTamil(m.address.city) : ''),
       m.team || '-',
+      (m as any).derivedFellowship,
       (m.status || 'regular').replace(/_/g, ' '),
       reportType === 'all' 
         ? ((m as any).isPresent ? 'Present' : 'Absent') 
@@ -185,7 +198,6 @@ const Reports: React.FC = () => {
       <Tabs defaultValue="attendance" className="space-y-6">
         <TabsList className="bg-secondary/50">
           <TabsTrigger value="attendance">Attendance Report</TabsTrigger>
-          <TabsTrigger value="fellowship">Fellowship Report</TabsTrigger>
           <TabsTrigger value="overall">Overall Member Report</TabsTrigger>
           <TabsTrigger value="celebrations" className="gap-2">
             <PartyPopper className="w-4 h-4" />
@@ -218,7 +230,7 @@ const Reports: React.FC = () => {
             <>
               {/* Filters */}
               <div className="glass rounded-xl p-6 animate-fade-in">
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                   <div className="space-y-2">
                     <Label>Report Type</Label>
                     <Select value={reportType} onValueChange={(v) => setReportType(v as any)}>
@@ -291,6 +303,23 @@ const Reports: React.FC = () => {
                     </Select>
                   </div>
 
+                  <div className="space-y-2">
+                    <Label>Fellowship</Label>
+                    <Select value={fellowshipFilter} onValueChange={setFellowshipFilter}>
+                      <SelectTrigger className="bg-secondary/50">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Fellowships</SelectItem>
+                        <SelectItem value="Children">Children</SelectItem>
+                        <SelectItem value="Youth Boys Fellowship">Youth Boys Fellowship</SelectItem>
+                        <SelectItem value="Youth Girls Fellowship">Youth Girls Fellowship</SelectItem>
+                        <SelectItem value="Men's Fellowship">Men's Fellowship</SelectItem>
+                        <SelectItem value="Women's Fellowship">Women's Fellowship</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
                   <div className="flex items-end">
                     <Button
                       onClick={handleExport}
@@ -321,7 +350,8 @@ const Reports: React.FC = () => {
               </div>
 
               {/* Report Table */}
-              <div className="glass rounded-xl overflow-hidden animate-fade-in">
+              <div className="mt-8">
+                <div className="glass rounded-xl overflow-hidden animate-fade-in">
                 <Table>
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
@@ -330,6 +360,7 @@ const Reports: React.FC = () => {
                       <TableHead className="text-muted-foreground">Phone</TableHead>
                       <TableHead className="text-muted-foreground">Address</TableHead>
                       <TableHead className="text-muted-foreground">Team</TableHead>
+                      <TableHead className="text-muted-foreground">Fellowship</TableHead>
                       {reportType === 'all' && (
                         <TableHead className="text-muted-foreground">Status</TableHead>
                       )}
@@ -353,6 +384,9 @@ const Reports: React.FC = () => {
                             </Badge>
                           )}
                         </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {(member as any).derivedFellowship}
+                        </TableCell>
                         {reportType === 'all' && (
                           <TableCell>
                             <Badge
@@ -375,6 +409,7 @@ const Reports: React.FC = () => {
                   </div>
                 )}
               </div>
+            </div>
             </>
           )}
 
@@ -386,41 +421,7 @@ const Reports: React.FC = () => {
           )}
         </TabsContent>
 
-        {/* Fellowship Report Tab */}
-        <TabsContent value="fellowship" className="space-y-6">
-          {/* Event Selector */}
-          <div className="glass rounded-xl p-6 animate-fade-in [animation-delay:100ms]">
-            <div className="space-y-2">
-              <Label>Select Event</Label>
-              <Select value={selectedEventId} onValueChange={setSelectedEventId}>
-                <SelectTrigger className="bg-secondary/50 max-w-md">
-                  <SelectValue placeholder="Choose an event..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {events.map(event => (
-                    <SelectItem key={event.id} value={event.id}>
-                      {event.name} - {format(new Date(event.date), 'MMM dd, yyyy')}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
 
-          {selectedEventId ? (
-            <FellowshipReport
-              members={eligibleMembers}
-              attendance={attendance}
-              selectedEventId={selectedEventId}
-              eventName={selectedEvent ? `${selectedEvent.name}-${selectedEvent.date}` : ''}
-            />
-          ) : (
-            <div className="glass rounded-xl p-12 text-center text-muted-foreground animate-fade-in">
-              <FileBarChart className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              Select an event above to view the fellowship report.
-            </div>
-          )}
-        </TabsContent>
 
         {/* Celebrations Tab */}
         <TabsContent value="celebrations">

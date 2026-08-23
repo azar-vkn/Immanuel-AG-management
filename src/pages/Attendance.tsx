@@ -13,9 +13,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Search, UserCheck, CheckCircle2, X, Loader2, Users, ScanBarcode } from 'lucide-react';
+import { Search, UserCheck, CheckCircle2, X, Loader2, Users, ScanBarcode, ScanFace, Video } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { format, differenceInYears } from 'date-fns';
 import { toast } from 'sonner';
+
+// Face recognition is loaded on demand so its TensorFlow.js bundle never
+// enters the main page bundle. It only mounts when face mode is switched on.
+const FaceAttendancePanel = React.lazy(() =>
+  import('@/components/face/FaceAttendancePanel').then((m) => ({ default: m.FaceAttendancePanel })),
+);
 
 // Fellowship categorization: use explicit field if set, otherwise auto-categorize
 const getCategoryForMember = (member: Member): FellowshipType => {
@@ -51,6 +58,10 @@ const Attendance: React.FC = () => {
   const [expandedFamilyId, setExpandedFamilyId] = useState<string | null>(null);
   const [barcodeInput, setBarcodeInput] = useState('');
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  // Face recognition toggles — independent: recognition can run with the
+  // preview hidden to save screen space.
+  const [faceModeEnabled, setFaceModeEnabled] = useState(false);
+  const [facePreviewEnabled, setFacePreviewEnabled] = useState(true);
   // Tracks member IDs currently being marked to prevent race condition double-submissions
   const markingInProgress = useRef<Set<string>>(new Set());
 
@@ -67,6 +78,10 @@ const Attendance: React.FC = () => {
         setEvents(eventsData);
         setMembers(membersData);
         setAttendance(attendanceData);
+        // Auto-select the most recent event (events are sorted by date desc)
+        if (eventsData.length > 0) {
+          setSelectedEventId(eventsData[0].id);
+        }
       } catch (error) {
         console.error('Error fetching data:', error);
         toast.error('Failed to load data');
@@ -107,7 +122,7 @@ const Attendance: React.FC = () => {
     if (!searchName && !searchId && !searchPhone) return [];
 
     const searchTerms = searchName.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const normalizedSearchName = searchName.trim().toLowerCase().replace(/[\s\.\,\-]/g, '');
+    const normalizedSearchName = searchName.trim().toLowerCase().replace(/[\s.,-]/g, '');
 
     const filtered = eligibleMembers.filter(m => {
       if (m.status === 'expired') return false;
@@ -124,8 +139,8 @@ const Attendance: React.FC = () => {
         );
         
         // No-space match: allows finding "John Doe" when searching "johndoe"
-        const normalizedName = lowerName.replace(/[\s\.\,\-]/g, '');
-        const normalizedTamil = lowerTamil.replace(/[\s\.\,\-]/g, '');
+        const normalizedName = lowerName.replace(/[\s.,-]/g, '');
+        const normalizedTamil = lowerTamil.replace(/[\s.,-]/g, '');
         const matchNoSpaces = normalizedSearchName && (
           normalizedName.includes(normalizedSearchName) || 
           normalizedTamil.includes(normalizedSearchName)
@@ -178,6 +193,38 @@ const Attendance: React.FC = () => {
     }
   };
 
+  const handleMarkFamily = async (familyMembers: Member[]) => {
+    const membersToMark = familyMembers.filter(m => !markedMemberIds.has(m.id) && !markingInProgress.current.has(m.id));
+    
+    if (membersToMark.length === 0) {
+      toast.info('All family members are already marked present');
+      return;
+    }
+
+    membersToMark.forEach(m => markingInProgress.current.add(m.id));
+
+    try {
+      const newRecords = await Promise.all(membersToMark.map(async (member) => {
+        const newAttendanceData = {
+          eventId: selectedEventId,
+          memberId: member.id,
+          markedAt: new Date().toISOString(),
+          markedBy: user?.id || 'unknown'
+        };
+        const id = await markAttendance(newAttendanceData);
+        return { id, ...newAttendanceData };
+      }));
+      
+      setAttendance(prev => [...prev, ...newRecords]);
+      toast.success(`Marked ${membersToMark.length} family member(s) as present`);
+    } catch (error) {
+      console.error('Error marking family attendance:', error);
+      toast.error('Failed to mark some family members');
+    } finally {
+      membersToMark.forEach(m => markingInProgress.current.delete(m.id));
+    }
+  };
+
   // Handle barcode scan on Enter key: find exact member ID match, mark present, clear field
   const handleBarcodeSubmit = useCallback(async () => {
     const trimmed = barcodeInput.trim();
@@ -225,6 +272,31 @@ const Attendance: React.FC = () => {
       handleBarcodeSubmit();
     }
   }, [handleBarcodeSubmit]);
+
+  // Stable list of already-present members for the face tracker's dedup set.
+  const markedMemberIdList = useMemo(() => Array.from(markedMemberIds), [markedMemberIds]);
+
+  // Bridge from face recognition into the EXISTING marking logic. The tracker
+  // only reports matches at or above its confidence gate, so anything arriving
+  // here is already confirmed; handleMarkAttendance still performs the same
+  // duplicate check it does for barcode and search.
+  const handleFaceRecognized = (memberDocId: string, confidence: number) => {
+    const member = eligibleMembers.find(
+      (m) => m.id === memberDocId && m.status !== 'expired',
+    );
+    if (!member) {
+      const known = members.find((m) => m.id === memberDocId);
+      toast.warning(
+        known
+          ? `${known.name} is not in this event's fellowships`
+          : 'Recognised a member who is not eligible for this event',
+      );
+      return;
+    }
+    if (markedMemberIds.has(member.id)) return; // already present — stay quiet
+    handleMarkAttendance(member);
+    toast.success(`Face matched: ${member.name} (${Math.round(confidence * 100)}%)`);
+  };
 
 
   const handleRemoveAttendance = async (memberId: string) => {
@@ -330,6 +402,73 @@ const Attendance: React.FC = () => {
                 Mark Attendance
               </h3>
               
+              {/* Face Recognition — marks automatically; barcode and search
+                  below continue to work exactly as before. */}
+              <div className="mb-5 p-4 rounded-lg bg-primary/5 border border-primary/20">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <Label className="flex items-center gap-2 text-primary font-semibold">
+                    <ScanFace className="w-4 h-4" />
+                    Mark by Face
+                  </Label>
+
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="faceModeToggle"
+                        checked={faceModeEnabled}
+                        onCheckedChange={setFaceModeEnabled}
+                      />
+                      <Label htmlFor="faceModeToggle" className="text-xs cursor-pointer">
+                        Face Detection
+                      </Label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="facePreviewToggle"
+                        checked={facePreviewEnabled}
+                        onCheckedChange={setFacePreviewEnabled}
+                        disabled={!faceModeEnabled}
+                      />
+                      <Label
+                        htmlFor="facePreviewToggle"
+                        className={`text-xs cursor-pointer flex items-center gap-1 ${
+                          !faceModeEnabled ? 'text-muted-foreground' : ''
+                        }`}
+                      >
+                        <Video className="w-3.5 h-3.5" />
+                        Camera Preview
+                      </Label>
+                    </div>
+                  </div>
+                </div>
+
+                {faceModeEnabled ? (
+                  <div className="mt-4">
+                    <React.Suspense
+                      fallback={
+                        <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Loading face recognition...
+                        </div>
+                      }
+                    >
+                      <FaceAttendancePanel
+                        eventId={selectedEventId}
+                        markedMemberIds={markedMemberIdList}
+                        onRecognized={handleFaceRecognized}
+                        showPreview={facePreviewEnabled}
+                      />
+                    </React.Suspense>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Turn on Face Detection to mark members automatically from the camera. Barcode
+                    and search below keep working either way.
+                  </p>
+                )}
+              </div>
+
               {/* Barcode Scanner Input */}
               <div className="mb-5 p-4 rounded-lg bg-emerald-500/5 border border-emerald-500/20">
                 <div className="space-y-2">
@@ -461,15 +600,25 @@ const Attendance: React.FC = () => {
                               </Button>
                             )}
                             {hasFamily && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => setExpandedFamilyId(expandedFamilyId === member.familyId ? null : member.familyId)}
-                                className="border-primary/50 text-primary hover:bg-primary/10"
-                              >
-                                <Users className="w-4 h-4 mr-1" />
-                                {expandedFamilyId === member.familyId ? 'Hide Family' : `Show Family (${familyMembers.length})`}
-                              </Button>
+                              <>
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleMarkFamily(familyMembers)}
+                                  className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-500 border border-emerald-500/30"
+                                >
+                                  <Users className="w-4 h-4 mr-1" />
+                                  Mark Family
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setExpandedFamilyId(expandedFamilyId === member.familyId ? null : member.familyId)}
+                                  className="border-primary/50 text-primary hover:bg-primary/10"
+                                >
+                                  <Users className="w-4 h-4 mr-1" />
+                                  {expandedFamilyId === member.familyId ? 'Hide Family' : `Show Family (${familyMembers.length})`}
+                                </Button>
+                              </>
                             )}
                           </div>
                         </div>

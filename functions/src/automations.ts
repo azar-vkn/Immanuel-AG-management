@@ -1,9 +1,7 @@
 import * as admin from 'firebase-admin';
 import { sendWhatsAppMessage, generateMessage } from './whatsappApi';
 
-if (!admin.apps.length) {
-  admin.initializeApp();
-}
+
 
 // Type Definitions
 type AutomationType = 'birthday' | 'anniversary';

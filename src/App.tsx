@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -21,6 +22,16 @@ import AnalyticsEmail from "./pages/automations/AnalyticsEmail";
 import AutomationLogs from "./pages/automations/AutomationLogs";
 import NotFound from "./pages/NotFound";
 
+// Face recognition pulls in TensorFlow.js, so it is loaded on demand rather
+// than in the main bundle that every page pays for.
+const LiveAttendance = lazy(() => import("./pages/LiveAttendance"));
+
+const PageLoader = () => (
+  <div className="flex items-center justify-center min-h-[400px] text-muted-foreground">
+    Loading...
+  </div>
+);
+
 const queryClient = new QueryClient();
 
 const App = () => (
@@ -40,6 +51,14 @@ const App = () => (
               <Route path="/families" element={<Families />} />
               <Route path="/events" element={<Events />} />
               <Route path="/attendance" element={<Attendance />} />
+              <Route
+                path="/attendance/live"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <LiveAttendance />
+                  </Suspense>
+                }
+              />
               <Route path="/reports" element={<Reports />} />
               <Route path="/follow-up" element={<FollowUp />} />
               <Route path="/teams" element={<TeamsManagement />} />

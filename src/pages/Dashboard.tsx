@@ -6,6 +6,7 @@ import { StatCard } from '@/components/dashboard/StatCard';
 import { BirthdayCard } from '@/components/dashboard/BirthdayCard';
 
 import { getMembers, getEvents, getAttendance } from '@/services/firestore';
+import { getTodaysBirthdays, getTodaysAnniversaries } from '@/services/automationService';
 import { Member, ChurchEvent, Attendance, FellowshipType } from '@/types';
 import { Users, UserCheck, Calendar, TrendingUp, Loader2 } from 'lucide-react';
 import { format, addDays, subDays, differenceInYears } from 'date-fns';
@@ -85,19 +86,9 @@ const Dashboard: React.FC = () => {
   const currentMonth = today.getMonth();
   const currentDate = today.getDate();
 
-  const birthdaysToday = members.filter(m => {
-    if (m.status === 'expired') return false;
-    if (!m.dob) return false;
-    const dob = new Date(m.dob);
-    return dob.getMonth() === currentMonth && dob.getDate() === currentDate;
-  });
+  const birthdaysToday = getTodaysBirthdays(members);
 
-  const anniversariesToday = members.filter(m => {
-    if (m.status === 'expired') return false;
-    if (!m.anniversaryDate) return false;
-    const anniv = new Date(m.anniversaryDate);
-    return anniv.getMonth() === currentMonth && anniv.getDate() === currentDate;
-  });
+  const anniversariesToday = getTodaysAnniversaries(members);
 
   const attendanceRate = eligibleMembers.length > 0 
     ? Math.round((lastEventAttendance / eligibleMembers.length) * 100) 
@@ -166,10 +157,12 @@ const Dashboard: React.FC = () => {
         <BirthdayCard 
           members={birthdaysToday} 
           type="birthday" 
+          allMembers={members}
         />
         <BirthdayCard 
           members={anniversariesToday} 
           type="anniversary" 
+          allMembers={members}
         />
       </div>
 

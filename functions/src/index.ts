@@ -1,13 +1,14 @@
 import * as admin from 'firebase-admin';
+
+// Initialize Firebase Admin first
+admin.initializeApp();
+
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { onDocumentUpdated } from 'firebase-functions/v2/firestore';
 import { sendWishes } from './automations';
 import { sendWhatsAppMessage } from './whatsappApi';
 import { sendAnalyticsEmail, sendTestEmail } from './analyticsEmail';
-
-// Initialize Firebase Admin
-admin.initializeApp();
 
 // ============================================================================
 // SCHEDULED FUNCTIONS (Cron Jobs)

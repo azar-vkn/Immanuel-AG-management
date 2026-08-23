@@ -101,6 +101,30 @@ service cloud.firestore {
       allow update, delete: if false; // Logs are immutable
     }
     
+    // ==================== FACE RECOGNITION (BIOMETRIC) ====================
+
+    // Face profiles hold 128-D face embeddings — biometric data.
+    // Read is limited to admins and markers (the roles that operate the
+    // entrance camera); only admins may create, change or delete a profile.
+    match /face_profiles/{memberDocId} {
+      allow read: if isAdminOrMarker();
+      allow write: if isAdmin();
+
+      // Raw per-frame samples are kept apart from the matching template so the
+      // live attendance page never downloads them. Admin-only.
+      match /samples/{sampleDoc} {
+        allow read, write: if isAdmin();
+      }
+    }
+
+    // Recognition events — the live entrance log.
+    // Contains member names and timestamps, never face embeddings.
+    match /recognition_events/{eventId} {
+      allow read: if isAdminOrMarker();
+      allow create: if isAdminOrMarker();
+      allow update, delete: if false; // the log is append-only
+    }
+
     // ==================== ANALYTICS EMAIL ====================
     
     // Analytics Email Settings — Admin only

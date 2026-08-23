@@ -28,6 +28,8 @@ const rolePermissions: Record<UserRole, string[]> = {
     'families.view', 'families.edit', 'families.delete',
     'events.view', 'events.create', 'events.edit',
     'attendance.view', 'attendance.mark',
+    'attendance.live.view', 'attendance.live.control',
+    'face.register',
     'reports.view', 'reports.export',
     'followup.view', 'followup.edit',
     'teams.manage',
@@ -39,6 +41,7 @@ const rolePermissions: Record<UserRole, string[]> = {
     'families.view',
     'events.view', 'events.create', 'events.edit',
     'attendance.view', 'attendance.mark',
+    'attendance.live.view',
     'reports.view', 'reports.export'
   ],
   area_leader: [

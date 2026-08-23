@@ -175,27 +175,11 @@ export const FellowshipReport: React.FC<FellowshipReportProps> = ({
   return (
     <div className="space-y-6 animate-fade-in [animation-delay:200ms]">
       {/* Export Button */}
-      <div className="flex justify-end">
+      <div className="flex justify-end mb-4">
         <Button onClick={handleExport} className="gap-2 bg-primary hover:bg-primary/90">
           <Download className="w-4 h-4" />
           Export Fellowship Report
         </Button>
-      </div>
-
-      {/* Summary */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="glass rounded-xl p-4 text-center">
-          <p className="text-3xl font-bold text-foreground">{members.length}</p>
-          <p className="text-sm text-muted-foreground">Total Members</p>
-        </div>
-        <div className="glass rounded-xl p-4 text-center border-emerald-500/30">
-          <p className="text-3xl font-bold text-emerald-400">{totalPresent}</p>
-          <p className="text-sm text-muted-foreground">Present</p>
-        </div>
-        <div className="glass rounded-xl p-4 text-center border-red-500/30">
-          <p className="text-3xl font-bold text-red-400">{totalAbsent}</p>
-          <p className="text-sm text-muted-foreground">Absent</p>
-        </div>
       </div>
 
       {/* Category Cards */}
