@@ -280,3 +280,46 @@
     animation: shimmer 3s ease-in-out infinite;
   }
 }
+
+@layer utilities {
+  /**
+   * Slim, theme-aware scrollbar.
+   *
+   * The OS default is a wide grey bar with arrow buttons that reads as a
+   * browser artifact rather than part of the app. This keeps the same
+   * scrolling behaviour but draws a thin rounded thumb in the app's own
+   * colours, and only tints it once the pointer is in the region.
+   */
+  .scrollbar-slim {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border-radius: 9999px;
+    transition: background-color 150ms ease;
+  }
+
+  .scrollbar-slim:hover::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.25);
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.45);
+  }
+
+  /* Chromium draws stepper arrows on Windows unless they are removed. */
+  .scrollbar-slim::-webkit-scrollbar-button {
+    display: none;
+  }
+}

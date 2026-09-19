@@ -11,7 +11,9 @@ import {
   where,
   orderBy,
   Timestamp,
-  DocumentData
+  DocumentData,
+  onSnapshot,
+  Unsubscribe
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Member, Family, ChurchEvent, Attendance, FollowUp, User } from '@/types';
@@ -282,6 +284,29 @@ export const getAttendanceByEvent = async (eventId: string): Promise<Attendance[
     id: doc.id,
     ...doc.data()
   })) as Attendance[];
+};
+
+/**
+ * Live attendance for one event.
+ *
+ * Added so that two machines marking the same service see each other's marks
+ * within a second. The one-time getAttendance()/getAttendanceByEvent() loads
+ * are unchanged; this only keeps a page's copy fresh afterwards.
+ */
+export const subscribeToEventAttendance = (
+  eventId: string,
+  onUpdate: (records: Attendance[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe => {
+  const q = query(collection(db, COLLECTIONS.ATTENDANCE), where('eventId', '==', eventId));
+  return onSnapshot(
+    q,
+    (snap) => onUpdate(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Attendance)),
+    (err) => {
+      console.error('Live attendance subscription error:', err);
+      onError?.(err);
+    },
+  );
 };
 
 export const getAttendanceByMember = async (memberId: string): Promise<Attendance[]> => {

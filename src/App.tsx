@@ -38,7 +38,11 @@ const App = () => (
   <QueryClientProvider client={queryClient}>
     <AuthProvider>
       <TeamProvider>
-      <TooltipProvider>
+      {/* One provider for the whole app. Radix only coordinates "close the
+          others" within a single provider, so nesting one per component let
+          several tooltips stay open at once. disableHoverableContent stops a
+          tooltip lingering when the pointer drifts onto it. */}
+      <TooltipProvider delayDuration={250} skipDelayDuration={500} disableHoverableContent>
         <Toaster />
         <Sonner />
         <BrowserRouter>

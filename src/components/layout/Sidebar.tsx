@@ -8,7 +8,6 @@ import { cn } from '@/lib/utils';
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import {
@@ -40,7 +39,7 @@ const navItems = [
   { path: '/families', icon: UsersRound, label: 'Families', permission: 'families.view' },
   { path: '/events', icon: Calendar, label: 'Events', permission: 'events.view' },
   { path: '/attendance', icon: ClipboardCheck, label: 'Attendance', permission: 'attendance.view' },
-  { path: '/attendance/live', icon: ScanFace, label: 'Entrance Camera', permission: 'attendance.live.view' },
+  { path: '/attendance/live', icon: ScanFace, label: 'Face Configuration', permission: 'attendance.live.view' },
   { path: '/reports', icon: FileBarChart, label: 'Reports', permission: 'reports.view' },
   { path: '/follow-up', icon: Phone, label: 'Follow-Up', permission: 'followup.view' },
   { path: '/teams', icon: MapPinned, label: 'Teams', permission: 'teams.manage' },
@@ -57,6 +56,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
   };
 
   const visibleItems = navItems.filter(item => hasPermission(item.permission));
+
+  // Two-letter monogram, so the footer shows who is signed in without a photo.
+  const initials = (user?.name ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('') || '?';
 
   return (
     <aside
@@ -95,75 +102,101 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 py-4 px-3 overflow-y-auto">
-        <ul className="space-y-1">
+      <nav className="flex-1 py-3 px-3 overflow-y-auto scrollbar-slim">
+        <ul className="space-y-0.5">
           {visibleItems.map((item) => (
             <li key={item.path}>
-              <TooltipProvider delayDuration={0}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <NavLink
-                      to={item.path}
-                      className={({ isActive }) => cn(
-                        'flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 whitespace-nowrap overflow-hidden',
-                        'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent',
-                        isActive && 'bg-sidebar-accent text-sidebar-primary font-medium',
-                        collapsed && 'justify-center'
-                      )}
-                    >
-                      <item.icon className={cn('w-5 h-5 flex-shrink-0', collapsed && 'w-6 h-6')} />
-                      {!collapsed && <span className="truncate">{item.label}</span>}
-                    </NavLink>
-                  </TooltipTrigger>
-                  {collapsed && (
-                    <TooltipContent side="right" className="font-medium">
-                      {item.label}
-                    </TooltipContent>
-                  )}
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <NavLink
+                    to={item.path}
+                    className={({ isActive }) => cn(
+                      'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors whitespace-nowrap overflow-hidden',
+                      'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent',
+                      isActive && 'bg-sidebar-accent text-sidebar-primary font-medium',
+                      collapsed && 'justify-center'
+                    )}
+                  >
+                    <item.icon className={cn('w-[18px] h-[18px] flex-shrink-0', collapsed && 'w-5 h-5')} />
+                    {!collapsed && <span className="truncate">{item.label}</span>}
+                  </NavLink>
+                </TooltipTrigger>
+                {collapsed && (
+                  <TooltipContent side="right" className="font-medium">
+                    {item.label}
+                  </TooltipContent>
+                )}
+              </Tooltip>
             </li>
           ))}
         </ul>
       </nav>
 
-      {/* Theme Toggle & User Info & Logout */}
-      <div className="p-3 border-t border-sidebar-border space-y-2">
-        {/* Theme Toggle */}
-        <ThemeToggle collapsed={collapsed} />
-        
-        {!collapsed && user && (
-          <div className="px-3 py-2 rounded-lg bg-sidebar-accent/50">
-            <p className="text-sm font-medium text-foreground truncate">{user.name}</p>
-            <p className="text-xs text-muted-foreground capitalize">{user.role.replace('_', ' ')}</p>
-          </div>
-        )}
-        
-        <SidebarClock collapsed={collapsed} />
-
-        <TooltipProvider delayDuration={0}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                onClick={handleLogout}
-                className={cn(
-                  'w-full justify-start gap-3 text-muted-foreground hover:text-destructive hover:bg-destructive/10 whitespace-nowrap overflow-hidden',
-                  collapsed && 'justify-center'
-                )}
-              >
-                <LogOut className="w-5 h-5" />
-                {!collapsed && 'Sign Out'}
-              </Button>
-            </TooltipTrigger>
-            {collapsed && (
+      {/* Footer: identity, clock, theme and sign-out condensed into two rows
+          instead of four stacked blocks — that height is what pushed the nav
+          into its own scrollbar. */}
+      <div className="border-t border-sidebar-border p-3 space-y-2">
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-1">
+            <ThemeToggle collapsed />
+            <SidebarClock collapsed />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleLogout}
+                  className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                >
+                  <LogOut className="w-5 h-5" />
+                </Button>
+              </TooltipTrigger>
               <TooltipContent side="right" className="font-medium">
-                Sign Out
+                {user ? `${user.name} · Sign Out` : 'Sign Out'}
               </TooltipContent>
+            </Tooltip>
+          </div>
+        ) : (
+          <>
+            {user && (
+              <div className="flex items-center gap-2.5 px-1 min-w-0">
+                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-primary">
+                  {initials}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-foreground">{user.name}</p>
+                  <p className="text-xs capitalize text-muted-foreground">
+                    {user.role.replace('_', ' ')}
+                  </p>
+                </div>
+              </div>
             )}
-          </Tooltip>
-        </TooltipProvider>
+
+            <div className="flex items-center justify-between gap-2 px-1">
+              <SidebarClock collapsed={false} variant="inline" />
+              <div className="flex flex-shrink-0 items-center">
+                <ThemeToggle collapsed />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={handleLogout}
+                      className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                    >
+                      <LogOut className="w-[18px] h-[18px]" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="font-medium">
+                    Sign Out
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+          </>
+        )}
       </div>
+
     </aside>
   );
 };

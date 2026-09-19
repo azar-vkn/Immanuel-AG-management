@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { getEvents, getMembers, getAttendance, markAttendance, deleteAttendance } from '@/services/firestore';
+import { getEvents, getMembers, getAttendance, markAttendance, deleteAttendance, subscribeToEventAttendance } from '@/services/firestore';
+import { FamilyCheckIn, type FamilyGroup } from '@/components/face/FamilyCheckIn';
 import { Attendance as AttendanceType, Member, ChurchEvent, FellowshipType } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -20,6 +21,13 @@ import { toast } from 'sonner';
 
 // Face recognition is loaded on demand so its TensorFlow.js bundle never
 // enters the main page bundle. It only mounts when face mode is switched on.
+/**
+ * Height of the camera preview, in viewport-height percent. The family
+ * check-in column beside it uses the same cap so the two line up and both stay
+ * in view without scrolling.
+ */
+const FACE_PREVIEW_VH = 45;
+
 const FaceAttendancePanel = React.lazy(() =>
   import('@/components/face/FaceAttendancePanel').then((m) => ({ default: m.FaceAttendancePanel })),
 );
@@ -52,9 +60,7 @@ const Attendance: React.FC = () => {
   const [attendance, setAttendance] = useState<AttendanceType[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedEventId, setSelectedEventId] = useState<string>('');
-  const [searchName, setSearchName] = useState('');
-  const [searchId, setSearchId] = useState('');
-  const [searchPhone, setSearchPhone] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [expandedFamilyId, setExpandedFamilyId] = useState<string | null>(null);
   const [barcodeInput, setBarcodeInput] = useState('');
   const barcodeInputRef = useRef<HTMLInputElement>(null);
@@ -92,6 +98,19 @@ const Attendance: React.FC = () => {
     fetchData();
   }, []);
 
+  // Live sync for the selected event, ADDED on top of the one-time load above
+  // (which is unchanged). Two PCs marking the same service now see each other's
+  // marks within a second, instead of only after a page reload — which
+  // previously let the same person be marked twice, once on each machine.
+  useEffect(() => {
+    if (!selectedEventId) return;
+    const unsubscribe = subscribeToEventAttendance(selectedEventId, (live) => {
+      // Replace only this event's records; every other event stays as loaded.
+      setAttendance(prev => [...prev.filter(a => a.eventId !== selectedEventId), ...live]);
+    });
+    return () => unsubscribe();
+  }, [selectedEventId]);
+
   const selectedEvent = events.find(e => e.id === selectedEventId);
 
   // Filter members based on event's selected fellowships
@@ -119,47 +138,45 @@ const Attendance: React.FC = () => {
 
   const searchResults = useMemo(() => {
     if (!selectedEventId) return [];
-    if (!searchName && !searchId && !searchPhone) return [];
+    const query = searchQuery.trim();
+    if (!query) return [];
 
-    const searchTerms = searchName.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const normalizedSearchName = searchName.trim().toLowerCase().replace(/[\s.,-]/g, '');
+    const lowerQuery = query.toLowerCase();
+    const searchTerms = lowerQuery.split(/\s+/).filter(Boolean);
+    const normalizedQuery = lowerQuery.replace(/[\s.,-]/g, '');
+    // Phone matching ignores punctuation so "9788 128131" finds "9788128131".
+    const digitsQuery = query.replace(/\D/g, '');
 
     const filtered = eligibleMembers.filter(m => {
       if (m.status === 'expired') return false;
-      
-      let match = false;
-      
-      if (searchName) {
-        const lowerName = m.name.toLowerCase();
-        const lowerTamil = (m.tamilName || '').toLowerCase();
-        
-        // Multi-word match: allows finding "John Doe" even if name is "John A. Doe"
-        const matchTerms = searchTerms.length > 0 && searchTerms.every(term => 
-          lowerName.includes(term) || lowerTamil.includes(term)
-        );
-        
-        // No-space match: allows finding "John Doe" when searching "johndoe"
-        const normalizedName = lowerName.replace(/[\s.,-]/g, '');
-        const normalizedTamil = lowerTamil.replace(/[\s.,-]/g, '');
-        const matchNoSpaces = normalizedSearchName && (
-          normalizedName.includes(normalizedSearchName) || 
-          normalizedTamil.includes(normalizedSearchName)
-        );
-        
-        if (matchTerms || matchNoSpaces) match = true;
-      }
-      
-      if (!match && searchId && m.memberId.toLowerCase().includes(searchId.trim().toLowerCase())) match = true;
-      if (!match && searchPhone && m.phone.includes(searchPhone.trim())) match = true;
-      
-      return match;
+
+      const lowerName = m.name.toLowerCase();
+      const lowerTamil = (m.tamilName || '').toLowerCase();
+
+      // Multi-word match: allows finding "John Doe" even if name is "John A. Doe"
+      const matchTerms = searchTerms.length > 0 && searchTerms.every(term =>
+        lowerName.includes(term) || lowerTamil.includes(term)
+      );
+
+      // No-space match: allows finding "John Doe" when searching "johndoe"
+      const normalizedName = lowerName.replace(/[\s.,-]/g, '');
+      const normalizedTamil = lowerTamil.replace(/[\s.,-]/g, '');
+      const matchNoSpaces = !!normalizedQuery && (
+        normalizedName.includes(normalizedQuery) ||
+        normalizedTamil.includes(normalizedQuery)
+      );
+
+      const matchId = m.memberId.toLowerCase().includes(lowerQuery);
+      const matchPhone = digitsQuery.length > 0 && (m.phone || '').replace(/\D/g, '').includes(digitsQuery);
+
+      return matchTerms || matchNoSpaces || matchId || matchPhone;
     });
 
     // Sort by Member ID handling numeric suffixes, then limit results
     return filtered
       .sort((a, b) => a.memberId.localeCompare(b.memberId, undefined, { numeric: true }))
       .slice(0, 30);
-  }, [selectedEventId, searchName, searchId, searchPhone, eligibleMembers]);
+  }, [selectedEventId, searchQuery, eligibleMembers]);
 
   // Get family members for a given member (filtered by eligible fellowships)
   const getFamilyMembers = (member: Member): Member[] => {
@@ -297,6 +314,88 @@ const Attendance: React.FC = () => {
     handleMarkAttendance(member);
     toast.success(`Face matched: ${member.name} (${Math.round(confidence * 100)}%)`);
   };
+
+  // ---- Family check-in ----
+  // When someone is recognised, offer the rest of their family for one-tap
+  // marking. Aimed at young children, who are hard for the camera to catch.
+  // Reuses getFamilyMembers() and handleMarkAttendance() — no new marking path.
+  const MAX_FAMILY_GROUPS = 6;
+  const [recentFamilies, setRecentFamilies] = useState<{ familyId: string; seenMemberId: string }[]>([]);
+  // Latest person recognised, tracked separately so the panel can explain
+  // why nothing is offered instead of silently showing nothing.
+  const [lastSeenMemberId, setLastSeenMemberId] = useState<string | null>(null);
+
+  const handleMemberSeen = useCallback((memberDocId: string) => {
+    setLastSeenMemberId(memberDocId);
+    const seen = members.find((m) => m.id === memberDocId);
+    if (!seen?.familyId) return;
+    setRecentFamilies((prev) => {
+      // Most recent family on top; a family already showing just moves up.
+      const rest = prev.filter((f) => f.familyId !== seen.familyId);
+      return [{ familyId: seen.familyId, seenMemberId: seen.id }, ...rest].slice(0, MAX_FAMILY_GROUPS);
+    });
+  }, [members]);
+
+  const familyGroups = useMemo<FamilyGroup[]>(() => {
+    return recentFamilies
+      .map(({ familyId, seenMemberId }) => {
+        const seen = members.find((m) => m.id === seenMemberId);
+        if (!seen) return null;
+        const remaining = getFamilyMembers(seen)
+          .filter((m) => !markedMemberIds.has(m.id))
+          // Children first — they are the reason this panel exists.
+          .sort((a, b) => {
+            const aChild = getCategoryForMember(a) === 'Children' ? 0 : 1;
+            const bChild = getCategoryForMember(b) === 'Children' ? 0 : 1;
+            if (aChild !== bChild) return aChild - bChild;
+            return a.memberId.localeCompare(b.memberId, undefined, { numeric: true });
+          });
+        // A family drops out on its own once everyone in it is marked.
+        return remaining.length > 0 ? { familyId, seenName: seen.name, members: remaining } : null;
+      })
+      .filter((g): g is FamilyGroup => g !== null);
+    // getFamilyMembers reads eligibleMembers, listed here so this stays in step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recentFamilies, members, eligibleMembers, markedMemberIds]);
+
+  const isChildMember = useCallback(
+    (m: Member) => getCategoryForMember(m) === 'Children',
+    [],
+  );
+
+  /**
+   * When the latest person recognised has nobody to offer, say why. The three
+   * causes look identical otherwise, and one of them (fellowship scope) is easy
+   * to mistake for a fault.
+   */
+  const familyNote = useMemo<string | null>(() => {
+    if (!lastSeenMemberId) return null;
+    const seen = members.find((m) => m.id === lastSeenMemberId);
+    if (!seen) return null;
+    // Their family is on screen with people to tap — nothing to explain.
+    if (seen.familyId && familyGroups.some((g) => g.familyId === seen.familyId)) return null;
+
+    const relatives = seen.familyId
+      ? members.filter((m) => m.familyId === seen.familyId && m.id !== seen.id)
+      : [];
+    if (relatives.length === 0) {
+      return `${seen.name} — no other family members on record`;
+    }
+    const eligibleRelatives = getFamilyMembers(seen).filter((m) => m.id !== seen.id);
+    if (eligibleRelatives.length === 0) {
+      return `${seen.name} — family members aren't part of this event's fellowships`;
+    }
+    return `${seen.name} — whole family already marked`;
+    // getFamilyMembers reads eligibleMembers, listed here so this stays in step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSeenMemberId, members, familyGroups, eligibleMembers]);
+
+  // Clear the list when switching events, so one service's families don't
+  // carry over into the next.
+  useEffect(() => {
+    setRecentFamilies([]);
+    setLastSeenMemberId(null);
+  }, [selectedEventId]);
 
 
   const handleRemoveAttendance = async (memberId: string) => {
@@ -457,7 +556,26 @@ const Attendance: React.FC = () => {
                         eventId={selectedEventId}
                         markedMemberIds={markedMemberIdList}
                         onRecognized={handleFaceRecognized}
+                        onMemberSeen={handleMemberSeen}
                         showPreview={facePreviewEnabled}
+                        previewMaxHeightVh={FACE_PREVIEW_VH}
+                        aside={
+                          <FamilyCheckIn
+                            groups={familyGroups}
+                            note={familyNote}
+                            isChild={isChildMember}
+                            onMark={handleMarkAttendance}
+                            onDismiss={(familyId) =>
+                              setRecentFamilies((prev) => prev.filter((f) => f.familyId !== familyId))
+                            }
+                            onClearAll={() => {
+                              setRecentFamilies([]);
+                              setLastSeenMemberId(null);
+                            }}
+                            alwaysVisible
+                            maxHeightVh={FACE_PREVIEW_VH}
+                          />
+                        }
                       />
                     </React.Suspense>
                   </div>
@@ -498,59 +616,34 @@ const Attendance: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                <div className="space-y-2">
-                  <Label htmlFor="searchName">Search by Name</Label>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                    <Input
-                      id="searchName"
-                      placeholder="Enter name..."
-                      value={searchName}
-                      onChange={(e) => { setSearchName(e.target.value.trimStart()); setSearchId(''); setSearchPhone(''); }}
-                      className="pl-9 bg-secondary/50"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="searchId">Search by Member ID</Label>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                    <Input
-                      id="searchId"
-                      placeholder="e.g., IAG00001"
-                      value={searchId}
-                      onChange={(e) => { setSearchId(e.target.value.trim()); setSearchName(''); setSearchPhone(''); }}
-                      onPaste={(e) => {
-                        e.preventDefault();
-                        const pasted = e.clipboardData.getData('text').trim();
-                        setSearchId(pasted);
-                        setSearchName('');
-                        setSearchPhone('');
-                      }}
-                      className="pl-9 bg-secondary/50"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="searchPhone">Search by Phone</Label>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                    <Input
-                      id="searchPhone"
-                      placeholder="Enter phone number..."
-                      value={searchPhone}
-                      onChange={(e) => { setSearchPhone(e.target.value.trim()); setSearchName(''); setSearchId(''); }}
-                      onPaste={(e) => {
-                        e.preventDefault();
-                        const pasted = e.clipboardData.getData('text').trim();
-                        setSearchPhone(pasted);
-                        setSearchName('');
-                        setSearchId('');
-                      }}
-                      className="pl-9 bg-secondary/50"
-                    />
-                  </div>
+              {/* One field searching name, member ID and phone together —
+                  the same three matchers as before, just no longer split
+                  across boxes the operator has to choose between. */}
+              <div className="space-y-2 mb-4">
+                <Label htmlFor="memberSearch">Search Member</Label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <Input
+                    id="memberSearch"
+                    placeholder="Search by name, phone, or member ID..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value.trimStart())}
+                    onPaste={(e) => {
+                      e.preventDefault();
+                      setSearchQuery(e.clipboardData.getData('text').trim());
+                    }}
+                    className="pl-9 pr-9 bg-secondary/50"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      title="Clear search"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
               </div>
 

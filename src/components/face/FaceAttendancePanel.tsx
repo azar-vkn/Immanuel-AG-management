@@ -9,7 +9,7 @@ import {
   getTemplateCount,
   MIN_CONFIDENCE,
 } from '@/vision/tracker';
-import { getFaceTemplates } from '@/services/faceService';
+import { subscribeToFaceTemplates } from '@/services/faceService';
 import type { RecognitionEvent } from '@/types/face';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, ScanFace, ShieldAlert } from 'lucide-react';
@@ -22,7 +22,21 @@ interface FaceAttendancePanelProps {
   markedMemberIds: string[];
   /** Fired only for matches at or above MIN_CONFIDENCE. */
   onRecognized: (memberDocId: string, confidence: number) => void;
+  /**
+   * Fired whenever a registered member is seen — including ones already
+   * marked. Lets the page offer that member's family, since a parent may have
+   * been marked earlier while their children still need marking.
+   */
+  onMemberSeen?: (memberDocId: string) => void;
   showPreview: boolean;
+  /**
+   * Shown beside the camera preview (right of it on wide screens). Used for
+   * family check-in, so the operator can watch the camera and tap family
+   * members without scrolling.
+   */
+  aside?: React.ReactNode;
+  /** Tallest the preview may be, in viewport-height percent. */
+  previewMaxHeightVh?: number;
 }
 
 interface FeedLine {
@@ -44,7 +58,10 @@ export const FaceAttendancePanel: React.FC<FaceAttendancePanelProps> = ({
   eventId,
   markedMemberIds,
   onRecognized,
+  onMemberSeen,
   showPreview,
+  aside,
+  previewMaxHeightVh = 45,
 }) => {
   const [modelsReady, setModelsReady] = useState(false);
   const [modelError, setModelError] = useState(false);
@@ -61,6 +78,11 @@ export const FaceAttendancePanel: React.FC<FaceAttendancePanelProps> = ({
     onRecognizedRef.current = onRecognized;
   }, [onRecognized]);
 
+  const onMemberSeenRef = useRef(onMemberSeen);
+  useEffect(() => {
+    onMemberSeenRef.current = onMemberSeen;
+  }, [onMemberSeen]);
+
   // ---- Load models on mount (the panel only mounts when face mode is on) ----
   useEffect(() => {
     let cancelled = false;
@@ -75,21 +97,20 @@ export const FaceAttendancePanel: React.FC<FaceAttendancePanelProps> = ({
     };
   }, []);
 
-  // ---- Load registered faces for this event ----
+  // ---- Registered faces, kept live ----
+  // A subscription rather than a one-time load, so a face registered on the
+  // other PC mid-service is recognisable here within a second.
   useEffect(() => {
     if (!eventId) return;
-    let cancelled = false;
     setTemplateError(null);
 
-    getFaceTemplates()
-      .then((templates) => {
-        if (cancelled) return;
+    const unsubscribe = subscribeToFaceTemplates(
+      (templates) => {
         setTemplates(templates);
         setTemplateCount(getTemplateCount());
-      })
-      .catch((err) => {
-        console.error('Error loading face templates:', err);
-        if (cancelled) return;
+        setTemplateError(null);
+      },
+      (err) => {
         setTemplates([]);
         setTemplateCount(0);
         const denied =
@@ -100,11 +121,10 @@ export const FaceAttendancePanel: React.FC<FaceAttendancePanelProps> = ({
             ? 'Permission denied reading registered faces. Sign in as an administrator.'
             : 'Could not load registered faces.',
         );
-      });
+      },
+    );
 
-    return () => {
-      cancelled = true;
-    };
+    return () => unsubscribe();
   }, [eventId]);
 
   // ---- Keep the tracker's dedup set in step with what's already marked ----
@@ -140,10 +160,12 @@ export const FaceAttendancePanel: React.FC<FaceAttendancePanelProps> = ({
               'ok',
             );
             onRecognizedRef.current(event.memberDocId, event.confidence ?? 0);
+            onMemberSeenRef.current?.(event.memberDocId);
           }
           break;
         case 'ALREADY_MARKED':
           pushFeed(`${event.memberName} — already marked`, 'info');
+          if (event.memberDocId) onMemberSeenRef.current?.(event.memberDocId);
           break;
         case 'UNKNOWN':
           pushFeed(event.message, 'warn');
@@ -201,14 +223,36 @@ export const FaceAttendancePanel: React.FC<FaceAttendancePanelProps> = ({
         </div>
       )}
 
-      <FaceCanvas
-        stream={stream}
-        mode="recognition"
-        showPreview={showPreview}
-        onEventFired={handleEvent}
-        onDetectionStateChange={setFaceCount}
-        idleMessage="Camera is off — turn it on to recognise faces"
-      />
+      {/* Preview on the left, the aside (family check-in) on the right, so both
+          are in view together. The preview is sized to the video's own shape,
+          which is what frees the room for the right-hand column. With the
+          preview hidden there is nothing to sit beside, so the aside spans the
+          full width instead. */}
+      <div
+        className={
+          showPreview && aside
+            ? 'flex flex-col lg:flex-row gap-3 items-start'
+            : 'space-y-3'
+        }
+      >
+        <div className={showPreview && aside ? 'w-full min-w-0 lg:w-auto lg:flex-[0_1_auto]' : ''}>
+          <FaceCanvas
+            stream={stream}
+            mode="recognition"
+            showPreview={showPreview}
+            previewMaxHeightVh={previewMaxHeightVh}
+            onEventFired={handleEvent}
+            onDetectionStateChange={setFaceCount}
+            idleMessage="Camera is off — turn it on to recognise faces"
+          />
+        </div>
+
+        {aside && (
+          <div className={showPreview ? 'w-full lg:flex-1 lg:min-w-[260px]' : 'w-full'}>
+            {aside}
+          </div>
+        )}
+      </div>
 
       <CameraControl
         onStream={handleStream}

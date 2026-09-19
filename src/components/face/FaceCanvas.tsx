@@ -4,7 +4,22 @@ import { processDetections, assessDetectionQuality } from '@/vision/tracker';
 import { getDetectorOptions } from '@/vision/models';
 import type { ActiveTrack, RecognitionEvent } from '@/types/face';
 import { Button } from '@/components/ui/button';
-import { RotateCcw, VideoOff } from 'lucide-react';
+import { RotateCcw, VideoOff, Loader2 } from 'lucide-react';
+
+/**
+ * Preview frame rate. A camera preview reads as smooth well below the monitor's
+ * refresh rate, and every frame drawn is a full-resolution copy competing with
+ * React for the main thread. 25fps looks fine and costs less than half of 60.
+ */
+const RENDER_INTERVAL_MS = 40;
+
+/**
+ * Minimum gap between inference passes. Not a throttle so much as a yield: it
+ * hands the main thread back to the browser between passes so the page can
+ * paint and stay responsive instead of being monopolised by back-to-back
+ * inference.
+ */
+const AI_YIELD_MS = 16;
 
 interface FaceCanvasProps {
   stream: MediaStream | null;
@@ -16,18 +31,27 @@ interface FaceCanvasProps {
   idleMessage?: string;
   /**
    * When false the video is hidden but detection keeps running. A hidden
-   * element still plays and still paints to the canvas, so recognition is
+   * element still plays and still feeds the inference canvas, so recognition is
    * unaffected — this only removes the picture from the page.
    */
   showPreview?: boolean;
+  /**
+   * Tallest the preview may be, as a percentage of viewport height. The box is
+   * then sized to the video's own shape, so there is no black letterboxing.
+   */
+  previewMaxHeightVh?: number;
 }
 
 /**
- * Live camera canvas with the prototype's two-loop architecture:
- *  - a render loop at screen refresh rate that only draws video + boxes
- *  - an AI loop throttled to ~10 FPS that runs detection off the critical path
+ * Live camera canvas with two independent loops:
  *
- * This split is what keeps the preview smooth while inference is running.
+ *  - a preview loop (~25fps) that only draws video and boxes for the operator
+ *  - an inference loop that draws into its OWN offscreen canvas and runs the
+ *    recognition pipeline
+ *
+ * Keeping them separate is what stops the UI juddering. The preview canvas is
+ * GPU-backed and cheap; the expensive full-resolution copy now happens once per
+ * inference pass (a few times a second) rather than on every displayed frame.
  */
 export const FaceCanvas: React.FC<FaceCanvasProps> = ({
   stream,
@@ -37,12 +61,18 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
   onDetectionStateChange,
   idleMessage = 'Camera is off',
   showPreview = true,
+  previewMaxHeightVh = 70,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fpsRef = useRef<HTMLDivElement>(null);
 
   const [rotation, setRotation] = useState<number>(0);
+  const [warmingUp, setWarmingUp] = useState(false);
+  // Width/height of the frame as displayed. Drives the box's aspect ratio, so
+  // the box hugs the video instead of stretching into black letterbox bars.
+  const [frameAspect, setFrameAspect] = useState(16 / 9);
+  const frameAspectRef = useRef(16 / 9);
 
   // Refs hold mutable per-frame state without triggering React re-renders.
   const latestTracksRef = useRef<ActiveTrack[]>([]);
@@ -50,6 +80,7 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
     faceapi.WithFaceLandmarks<faceapi.WithFaceDetection<object>>
   >[]>([]);
   const isDetectingRef = useRef(false);
+  const lastFaceCountRef = useRef(-1);
 
   useEffect(() => {
     if (videoRef.current && stream) {
@@ -58,44 +89,40 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
   }, [stream]);
 
   useEffect(() => {
-    if (!stream || !videoRef.current || !canvasRef.current) return;
+    if (!stream || !videoRef.current) return;
 
-    let animationFrameId: number;
-    let detectionInterval: ReturnType<typeof setInterval>;
-    let lastFrameTime = performance.now();
+    let animationFrameId = 0;
+    let aiTimeout: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    let lastRenderAt = 0;
+    let lastFpsAt = performance.now();
     let frameCount = 0;
 
-    // 1. Render loop — draws video and the current boxes only. No inference.
-    const renderLoop = () => {
+    // Dedicated offscreen canvas for inference. Never displayed, never styled,
+    // and written only when a pass is about to run.
+    const inferenceCanvas = document.createElement('canvas');
+    const inferenceCtx = inferenceCanvas.getContext('2d');
+
+    // No `willReadFrequently`: that flag forces a CPU-backed canvas, which made
+    // every drawImage a large main-thread memory copy and then forced
+    // TensorFlow.js to upload it back to the GPU. Left GPU-backed, the frame
+    // stays on the GPU the whole way through.
+    const displayCtx = canvasRef.current?.getContext('2d') ?? null;
+
+    /** Paint the current video frame, honouring rotation, into a canvas. */
+    const paintFrame = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
       const video = videoRef.current;
-      const canvas = canvasRef.current;
-
-      if (!video || !canvas || video.paused || video.ended) {
-        animationFrameId = requestAnimationFrame(renderLoop);
-        return;
-      }
-
-      const now = performance.now();
-      frameCount++;
-      if (now - lastFrameTime >= 1000) {
-        if (fpsRef.current) {
-          fpsRef.current.innerText = `${Math.round((frameCount * 1000) / (now - lastFrameTime))} FPS`;
-        }
-        frameCount = 0;
-        lastFrameTime = now;
-      }
+      if (!video) return;
 
       const isVertical = rotation === 90 || rotation === 270;
       const drawWidth = isVertical ? video.videoHeight : video.videoWidth;
       const drawHeight = isVertical ? video.videoWidth : video.videoHeight;
+      if (drawWidth === 0 || drawHeight === 0) return;
 
       if (canvas.width !== drawWidth || canvas.height !== drawHeight) {
         canvas.width = drawWidth;
         canvas.height = drawHeight;
       }
-
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
 
       ctx.save();
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -109,6 +136,41 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
         video.videoHeight,
       );
       ctx.restore();
+    };
+
+    // ---- 1. Preview loop: display only, throttled, skipped when hidden ----
+    const renderLoop = (timestamp: number) => {
+      animationFrameId = requestAnimationFrame(renderLoop);
+
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || !displayCtx || video.paused || video.ended) return;
+
+      // Throttle to RENDER_INTERVAL_MS rather than the monitor's refresh rate.
+      if (timestamp - lastRenderAt < RENDER_INTERVAL_MS) return;
+      lastRenderAt = timestamp;
+
+      frameCount++;
+      const now = performance.now();
+      if (now - lastFpsAt >= 1000) {
+        if (fpsRef.current) {
+          fpsRef.current.innerText = `${Math.round((frameCount * 1000) / (now - lastFpsAt))} FPS`;
+        }
+        frameCount = 0;
+        lastFpsAt = now;
+      }
+
+      paintFrame(displayCtx, canvas);
+
+      // Update the box's shape only when the frame's shape actually changes
+      // (first frame, or a rotation) — never every frame.
+      if (canvas.width > 0 && canvas.height > 0) {
+        const aspect = canvas.width / canvas.height;
+        if (Math.abs(aspect - frameAspectRef.current) > 0.01) {
+          frameAspectRef.current = aspect;
+          setFrameAspect(aspect);
+        }
+      }
 
       if (mode === 'registration') {
         const detections = latestDetectionsRef.current;
@@ -136,38 +198,47 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
             subLabel = `Frames: ${track.historySize}`;
           }
 
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 3;
-          ctx.strokeRect(x, y, width, height);
+          displayCtx.strokeStyle = color;
+          displayCtx.lineWidth = 3;
+          displayCtx.strokeRect(x, y, width, height);
 
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y - 45, Math.max(width, 150), 45);
+          displayCtx.fillStyle = color;
+          displayCtx.fillRect(x, y - 45, Math.max(width, 150), 45);
 
-          ctx.fillStyle = '#ffffff';
-          ctx.font = 'bold 16px sans-serif';
-          ctx.fillText(label, x + 6, y - 25);
+          displayCtx.fillStyle = '#ffffff';
+          displayCtx.font = 'bold 16px sans-serif';
+          displayCtx.fillText(label, x + 6, y - 25);
 
-          ctx.font = '12px sans-serif';
-          ctx.fillText(subLabel, x + 6, y - 8);
+          displayCtx.font = '12px sans-serif';
+          displayCtx.fillText(subLabel, x + 6, y - 8);
         });
       }
-
-      animationFrameId = requestAnimationFrame(renderLoop);
     };
 
-    // 2. AI loop — async so it never blocks rendering.
+    // ---- 2. Inference loop: own canvas, self-scheduling ----
     const runAI = async () => {
-      const canvas = canvasRef.current;
-      if (!canvas || isDetectingRef.current) return;
+      const video = videoRef.current;
+      if (!video || !inferenceCtx || isDetectingRef.current) return;
+      if (video.readyState < 2 || video.videoWidth === 0) return;
 
       isDetectingRef.current = true;
       try {
+        // One full-resolution copy per inference pass, instead of one per
+        // displayed frame. Same pixels the recogniser always saw, so face sizes
+        // and the quality gate are unaffected.
+        paintFrame(inferenceCtx, inferenceCanvas);
+
         const detections = await faceapi
-          .detectAllFaces(canvas, getDetectorOptions())
+          .detectAllFaces(inferenceCanvas, getDetectorOptions())
           .withFaceLandmarks()
           .withFaceDescriptors();
 
-        onDetectionStateChange?.(detections.length);
+        // Only notify React when the count actually changes — this used to fire
+        // a state update, and so a re-render, on every single pass.
+        if (detections.length !== lastFaceCountRef.current) {
+          lastFaceCountRef.current = detections.length;
+          onDetectionStateChange?.(detections.length);
+        }
 
         if (mode === 'registration') {
           latestDetectionsRef.current = detections;
@@ -188,24 +259,105 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
       }
     };
 
-    videoRef.current
-      .play()
-      .then(() => {
-        renderLoop();
-        detectionInterval = setInterval(runAI, 100); // ~10 FPS inference
-      })
-      .catch((e) => console.error('Video play error:', e));
+    /**
+     * Schedule passes back-to-back with a short yield, rather than on a fixed
+     * interval. A fixed 100ms interval wasted the remainder of the slot when a
+     * pass ran long, and fired pointlessly when it ran short.
+     */
+    const scheduleAI = () => {
+      if (cancelled) return;
+      aiTimeout = setTimeout(async () => {
+        await runAI();
+        scheduleAI();
+      }, AI_YIELD_MS);
+    };
+
+    /**
+     * Wait until the camera reports a settled frame size.
+     *
+     * Webcam streams (virtual cameras especially) report 0x0 first, then often
+     * a placeholder size, before settling on the real resolution. TensorFlow.js
+     * compiles its WebGL shaders per input SHAPE — so starting detection early
+     * makes it compile the entire program set once per transient size. That
+     * repeated recompilation, not inference itself, is what makes the first
+     * minute crawl.
+     */
+    const waitForStableSize = async () => {
+      let lastWidth = -1;
+      let stableTicks = 0;
+      // ~3s ceiling so a quirky camera can never block startup entirely.
+      for (let i = 0; i < 30 && !cancelled && stableTicks < 3; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const w = videoRef.current?.videoWidth ?? 0;
+        if (w > 0 && w === lastWidth) {
+          stableTicks++;
+        } else {
+          stableTicks = 0;
+          lastWidth = w;
+        }
+      }
+    };
+
+    const startPipeline = async () => {
+      try {
+        await videoRef.current?.play();
+      } catch (e) {
+        console.error('Video play error:', e);
+        return;
+      }
+      if (cancelled) return;
+
+      await waitForStableSize();
+      if (cancelled) return;
+
+      // Only run the preview loop when the preview is actually visible.
+      // Hidden, it was still drawing every frame for nobody to see.
+      if (showPreview) {
+        animationFrameId = requestAnimationFrame(renderLoop);
+      }
+
+      // Compile shaders once, up front, with the preview already visible and a
+      // "warming up" badge showing — instead of stalling the first ~100 frames.
+      setWarmingUp(true);
+      await runAI();
+      if (cancelled) return;
+      setWarmingUp(false);
+
+      scheduleAI();
+    };
+
+    startPipeline();
 
     return () => {
+      cancelled = true;
       cancelAnimationFrame(animationFrameId);
-      clearInterval(detectionInterval);
+      clearTimeout(aiTimeout);
+      lastFaceCountRef.current = -1;
+      // Release the offscreen frame buffer promptly.
+      inferenceCanvas.width = 0;
+      inferenceCanvas.height = 0;
     };
-  }, [stream, mode, onEventFired, onFramesCollected, onDetectionStateChange, rotation]);
+  }, [
+    stream,
+    mode,
+    onEventFired,
+    onFramesCollected,
+    onDetectionStateChange,
+    rotation,
+    showPreview,
+  ]);
 
   if (!stream) {
     if (!showPreview) return null;
     return (
-      <div className="w-full aspect-video bg-secondary/30 rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center text-muted-foreground gap-2">
+      <div
+        className="mx-auto bg-secondary/30 rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center text-muted-foreground gap-2"
+        style={{
+          aspectRatio: '16 / 9',
+          width: `calc(${previewMaxHeightVh}vh * ${16 / 9})`,
+          maxWidth: '100%',
+        }}
+      >
         <VideoOff className="w-8 h-8" />
         <span className="text-sm">{idleMessage}</span>
       </div>
@@ -216,12 +368,23 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
     <div
       className={
         showPreview
-          ? 'relative w-full overflow-hidden rounded-xl bg-black border border-border flex items-center justify-center min-h-[320px]'
+          ? 'relative mx-auto overflow-hidden rounded-xl bg-black border border-border'
           : 'sr-only'
+      }
+      // Width follows the height cap through the video's own aspect ratio, so
+      // the box is exactly the shape of the picture — no black side bars.
+      style={
+        showPreview
+          ? {
+              aspectRatio: `${frameAspect}`,
+              width: `calc(${previewMaxHeightVh}vh * ${frameAspect})`,
+              maxWidth: '100%',
+            }
+          : undefined
       }
     >
       <video ref={videoRef} className="absolute opacity-0 pointer-events-none" playsInline muted />
-      <canvas ref={canvasRef} className="w-full h-auto max-h-[70vh] object-contain" />
+      <canvas ref={canvasRef} className="absolute inset-0 block w-full h-full" />
 
       <div
         ref={fpsRef}
@@ -229,6 +392,15 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
       >
         0 FPS
       </div>
+
+      {warmingUp && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-[1px]">
+          <div className="flex items-center gap-2 rounded-lg bg-black/70 px-4 py-2.5 text-sm text-white">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Warming up recognition — first run only
+          </div>
+        </div>
+      )}
 
       <Button
         type="button"

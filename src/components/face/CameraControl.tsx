@@ -12,6 +12,28 @@ import { Badge } from '@/components/ui/badge';
 import { Camera, PlayCircle, StopCircle, RefreshCw, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 
+/**
+ * The last camera that was started successfully. Remembered per browser so the
+ * operator picks their entrance camera once, not once per member.
+ */
+const LAST_CAMERA_KEY = 'iag_last_camera_device_id';
+
+const readStoredDeviceId = (): string => {
+  try {
+    return localStorage.getItem(LAST_CAMERA_KEY) ?? '';
+  } catch {
+    return ''; // private mode / storage blocked
+  }
+};
+
+const storeDeviceId = (deviceId: string) => {
+  try {
+    localStorage.setItem(LAST_CAMERA_KEY, deviceId);
+  } catch {
+    /* non-fatal: we just won't remember it next time */
+  }
+};
+
 interface CameraControlProps {
   onStream: (stream: MediaStream | null) => void;
   isActive: boolean;
@@ -19,6 +41,14 @@ interface CameraControlProps {
   disabled?: boolean;
   label?: string;
   helpText?: string;
+  /**
+   * Start the camera automatically, once, as soon as a device is available —
+   * using the last camera that was used successfully. The selector and the
+   * ON/OFF buttons stay fully available; this only removes the two clicks it
+   * would otherwise take to get going. Fires once per mount, so pressing
+   * Camera OFF does not immediately restart it.
+   */
+  autoStart?: boolean;
 }
 
 /**
@@ -34,6 +64,7 @@ export const CameraControl: React.FC<CameraControlProps> = ({
   disabled = false,
   label = 'Camera',
   helpText,
+  autoStart = false,
 }) => {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
@@ -78,6 +109,9 @@ export const CameraControl: React.FC<CameraControlProps> = ({
       setDevices(videoDevices);
       setSelectedDeviceId((prev) => {
         if (prev && videoDevices.some((d) => d.deviceId === prev)) return prev;
+        // Reuse the camera chosen last time if it is still plugged in.
+        const stored = readStoredDeviceId();
+        if (stored && videoDevices.some((d) => d.deviceId === stored)) return stored;
         return videoDevices[0]?.deviceId ?? '';
       });
 
@@ -101,7 +135,7 @@ export const CameraControl: React.FC<CameraControlProps> = ({
     refreshDevices();
   }, [refreshDevices]);
 
-  const startCamera = async () => {
+  const startCamera = useCallback(async () => {
     if (!selectedDeviceId) {
       toast.error('Select a camera first');
       return;
@@ -117,6 +151,8 @@ export const CameraControl: React.FC<CameraControlProps> = ({
       streamRef.current = stream;
       onStream(stream);
       setHint(null);
+      // Remember what worked, so the next registration starts on it directly.
+      storeDeviceId(selectedDeviceId);
       // Labels become readable once permission is granted — refresh so the
       // dropdown shows real camera names instead of placeholders.
       if (devices.some((d) => !d.label)) {
@@ -141,7 +177,7 @@ export const CameraControl: React.FC<CameraControlProps> = ({
     } finally {
       setStarting(false);
     }
-  };
+  }, [selectedDeviceId, devices, onStream]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -151,6 +187,19 @@ export const CameraControl: React.FC<CameraControlProps> = ({
     }
     onStream(null);
   }, [onStream]);
+
+  /**
+   * Auto-start once a device is known. Guarded by a ref rather than state so it
+   * can only ever fire once per mount: turning the camera off must not trigger
+   * an immediate restart.
+   */
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoStartedRef.current) return;
+    if (disabled || isActive || !selectedDeviceId) return;
+    autoStartedRef.current = true;
+    startCamera();
+  }, [autoStart, disabled, isActive, selectedDeviceId, startCamera]);
 
   // Release the camera if this control unmounts while running.
   useEffect(() => {

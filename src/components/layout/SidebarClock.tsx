@@ -4,15 +4,19 @@ import { cn } from '@/lib/utils';
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 
 interface SidebarClockProps {
   collapsed: boolean;
+  /**
+   * 'card'   — the original boxed clock.
+   * 'inline' — a single muted line, for the compact footer.
+   */
+  variant?: 'card' | 'inline';
 }
 
-export const SidebarClock: React.FC<SidebarClockProps> = ({ collapsed }) => {
+export const SidebarClock: React.FC<SidebarClockProps> = ({ collapsed, variant = 'card' }) => {
   const [time, setTime] = useState(new Date());
 
   useEffect(() => {
@@ -27,21 +31,27 @@ export const SidebarClock: React.FC<SidebarClockProps> = ({ collapsed }) => {
 
   if (collapsed) {
     return (
-      <TooltipProvider delayDuration={0}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div className="flex flex-col items-center justify-center py-2 text-muted-foreground cursor-default">
-              <Clock className="w-5 h-5" />
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="right" className="font-medium">
-            <div className="flex flex-col">
-              <span className="text-sm font-semibold">{formattedTime}</span>
-              <span className="text-xs text-muted-foreground">{formattedDate}</span>
-            </div>
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="flex flex-col items-center justify-center py-2 text-muted-foreground cursor-default">
+            <Clock className="w-5 h-5" />
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="font-medium">
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold">{formattedTime}</span>
+            <span className="text-xs text-muted-foreground">{formattedDate}</span>
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  if (variant === 'inline') {
+    return (
+      <span className="text-xs text-muted-foreground truncate" title={formattedDate}>
+        {formattedTime} · {formattedDate}
+      </span>
     );
   }
 

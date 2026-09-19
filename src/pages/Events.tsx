@@ -14,7 +14,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { Plus, Calendar, Clock, Edit2, Trash2, Loader2, Users, CheckCircle, PlayCircle, XCircle, BarChart3 } from 'lucide-react';
+import { Plus, Calendar, Clock, Edit2, Trash2, Loader2, Users, CheckCircle, PlayCircle, XCircle, BarChart3, Repeat } from 'lucide-react';
 import { format, differenceInYears } from 'date-fns';
 import { toast } from 'sonner';
 
@@ -24,6 +24,70 @@ const FELLOWSHIP_COLORS: Record<FellowshipType, string> = {
   'Youth Girls Fellowship': 'bg-pink-500/15 text-pink-400 border-pink-500/30',
   "Men's Fellowship": 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
   "Women's Fellowship": 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+};
+
+/**
+ * Recurring services the church creates week after week.
+ *
+ * `nameFormat` reproduces the naming already in use, including the space
+ * before the bracket on Youth Meeting but not on Sunday Service — matching the
+ * existing records matters more here than internal tidiness.
+ *
+ * `weekday` is the day the event normally falls on (0 = Sunday), used to
+ * pre-fill the next occurrence. The time is remembered from the last one you
+ * created rather than hard-coded, so it adapts to your actual schedule.
+ */
+interface EventPreset {
+  id: string;
+  label: string;
+  nameFormat: (dateLabel: string) => string;
+  weekday: number;
+  fellowships: FellowshipType[];
+}
+
+const EVENT_PRESETS: EventPreset[] = [
+  {
+    id: 'sunday_service',
+    label: 'Sunday Service',
+    nameFormat: (d) => `Sunday Service(${d})`,
+    weekday: 0, // Sunday
+    fellowships: [...FELLOWSHIP_OPTIONS],
+  },
+  {
+    id: 'youth_meeting',
+    label: 'Youth Meeting',
+    nameFormat: (d) => `Youth Meeting (${d})`,
+    weekday: 6, // Saturday
+    fellowships: ['Youth Boys Fellowship', 'Youth Girls Fellowship'],
+  },
+];
+
+const PRESET_TIME_KEY = 'iag_event_preset_times';
+
+/** Remembered start time per preset, so the second one onwards is prefilled. */
+const readPresetTimes = (): Record<string, string> => {
+  try {
+    return JSON.parse(localStorage.getItem(PRESET_TIME_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+};
+
+const writePresetTime = (presetId: string, time: string) => {
+  if (!time) return;
+  try {
+    localStorage.setItem(PRESET_TIME_KEY, JSON.stringify({ ...readPresetTimes(), [presetId]: time }));
+  } catch {
+    /* non-fatal */
+  }
+};
+
+/** The next date falling on `weekday`, today included. */
+const nextOccurrence = (weekday: number): Date => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + ((weekday - d.getDay() + 7) % 7));
+  return d;
 };
 
 const getCategoryForMember = (member: Member): FellowshipType => {
@@ -100,6 +164,26 @@ const Events: React.FC = () => {
     return { presentCount, absentCount, eligibleCount };
   };
 
+  /**
+   * Fill the form from a recurring-event preset. Everything stays editable —
+   * this only removes the retyping, it doesn't lock anything down.
+   */
+  const applyPreset = (preset: EventPreset) => {
+    const date = nextOccurrence(preset.weekday);
+    setFormData({
+      name: preset.nameFormat(format(date, 'dd/MM/yyyy')),
+      date: format(date, 'yyyy-MM-dd'),
+      time: readPresetTimes()[preset.id] ?? '',
+      description: '',
+      fellowships: [...preset.fellowships],
+    });
+  };
+
+  /** Which preset, if any, the current form name matches — for the active state. */
+  const activePresetId = EVENT_PRESETS.find((p) =>
+    formData.name.startsWith(p.nameFormat('').replace(/\(\)$/, '').trim()),
+  )?.id;
+
   const toggleFellowship = (fellowship: FellowshipType) => {
     setFormData(prev => ({
       ...prev,
@@ -153,6 +237,9 @@ const Events: React.FC = () => {
         };
         const id = await createEvent(newEventData);
         setEvents([{ id, ...newEventData }, ...events]);
+        // Learn the time for this recurring event so the next one prefills.
+        const matched = EVENT_PRESETS.find((p) => formData.name.startsWith(p.label));
+        if (matched) writePresetTime(matched.id, formData.time);
         toast.success('Event created successfully');
       }
 
@@ -250,6 +337,35 @@ const Events: React.FC = () => {
                 </DialogTitle>
               </DialogHeader>
               <form onSubmit={handleSubmit} className="space-y-4 pt-4">
+                {/* Quick fill for the two services created every week. Only on
+                    create — on edit it would silently overwrite the record. */}
+                {!editingEvent && (
+                  <div className="space-y-2 rounded-lg border border-border/50 bg-secondary/30 p-3">
+                    <Label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Repeat className="w-3.5 h-3.5" />
+                      Quick create
+                    </Label>
+                    <div className="flex flex-wrap gap-2">
+                      {EVENT_PRESETS.map((preset) => (
+                        <Button
+                          key={preset.id}
+                          type="button"
+                          variant={activePresetId === preset.id ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => applyPreset(preset)}
+                          className="gap-1.5"
+                        >
+                          <Calendar className="w-3.5 h-3.5" />
+                          {preset.label}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Fills the name, next date and fellowships. Everything stays editable.
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="name">Event Name *</Label>
                   <Input

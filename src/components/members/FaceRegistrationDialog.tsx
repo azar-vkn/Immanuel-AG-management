@@ -54,7 +54,11 @@ interface FaceRegistrationDialogProps {
   member: Member | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onRegistered?: () => void;
+  /**
+   * Fires after face data changes. `action` distinguishes a save from a
+   * removal so callers can react only to a successful registration.
+   */
+  onRegistered?: (action: 'saved' | 'removed') => void;
 }
 
 export const FaceRegistrationDialog: React.FC<FaceRegistrationDialogProps> = ({
@@ -215,7 +219,7 @@ export const FaceRegistrationDialog: React.FC<FaceRegistrationDialogProps> = ({
       });
       const refreshed = await getFaceProfile(member.id);
       setProfile(refreshed);
-      onRegistered?.();
+      onRegistered?.('saved');
     } catch (err) {
       console.error('Face registration failed:', err);
       setFailed(true);
@@ -249,7 +253,7 @@ export const FaceRegistrationDialog: React.FC<FaceRegistrationDialogProps> = ({
       await deleteFaceProfile(member.id);
       setProfile(null);
       toast.success('Face data removed');
-      onRegistered?.();
+      onRegistered?.('removed');
     } catch (err) {
       console.error('Error removing face data:', err);
       toast.error('Failed to remove face data');
@@ -348,8 +352,9 @@ export const FaceRegistrationDialog: React.FC<FaceRegistrationDialogProps> = ({
               <CameraControl
                 onStream={handleStream}
                 isActive={!!stream}
+                autoStart
                 label="Registration Camera"
-                helpText="Look at the camera and slowly turn your head left, right, up and down."
+                helpText="Camera starts automatically on the last one you used. Look at it and slowly turn your head left, right, up and down."
               />
 
               {/* Capture progress */}

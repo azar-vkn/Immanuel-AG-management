@@ -1,39 +1,76 @@
 import * as faceapi from '@vladmandic/face-api';
-import type { ActiveTrack, FaceTemplate, RecognitionEvent } from '@/types/face';
+import type { ActiveTrack, FaceTemplate, RecognitionEvent, TrackSample } from '@/types/face';
 import { euclidean, meanDescriptor } from './faceMath';
+
+// ============================================================================
+// Walk-through recognition.
+//
+// Tuned for people walking TOWARDS the camera without stopping or posing.
+// The defining property of that situation: evidence gets BETTER over time.
+// A person entering starts far away (small, blurry, off-angle) and ends close
+// (large, sharp, frontal). Every decision below is shaped by that.
+// ============================================================================
 
 // ---- Tracking ----
 const IOU_THRESHOLD = 0.3;      // Min box overlap to treat as the same person
 const TRACK_TIMEOUT_MS = 2000;  // Keep a track alive this long without a sighting
 
 // ---- Frame quality gate ----
-// Only high-quality frames feed the template. Garbage frames (tiny, blurry,
-// turned away) produce garbage embeddings and are the main source of both
-// false matches and misses.
-const MIN_SCORE = 0.6;          // Detector confidence
-const MIN_AREA = 9000;          // ~95x95px face; rejects distant/tiny faces
-const YAW_LIMIT = 0.35;         // Frontality: |nose offset| / eye-distance
+// Frames below this bar never enter a template. Garbage frames produce garbage
+// embeddings and are the main source of both false matches and misses.
+const MIN_SCORE = 0.4;   // Detector confidence. TinyFaceDetector scores lower
+                         // than SSD for the same face, so this sits below the
+                         // old SSD-era 0.6 to avoid silently starving tracks.
+const MIN_AREA = 9000;   // ~95x95px face; rejects distant/tiny faces
+const YAW_LIMIT = 0.45;  // Frontality: |nose offset| / eye-distance.
+                         // Loosened from 0.35 because a walking person is
+                         // rarely square-on to the lens.
 
 // ---- Recognition ----
-const MAX_DESCRIPTORS = 20;      // Cap good frames accumulated per track
-const MIN_CONFIRM_FRAMES = 3;    // Frames of agreement to confirm a borderline match
-const RECOG_THRESHOLD = 0.5;     // Max mean-to-mean distance to accept a match
-const STRONG_THRESHOLD = 0.42;   // A single frame this close confirms instantly (doorway speed)
-const MATCH_MARGIN = 0.06;       // Best must beat 2nd-best person by this much
-const CONFIDENCE_FLOOR = 0.2;    // Distance mapped to ~100% confidence for display
+const MAX_SAMPLES = 12;       // Best frames retained per track
 
-// Attendance is only marked at this confidence or above. With the mapping
-// below this corresponds to a match distance of 0.29 or closer, which is
-// stricter than RECOG_THRESHOLD — so this gate, not the distance thresholds,
-// is what decides whether a member is marked.
+/**
+ * Distance calibration.
+ *
+ * face-api's own FaceMatcher treats 0.6 as the same-person boundary for these
+ * 128-D embeddings. The confidence scale below is anchored to that boundary so
+ * the percentage means something real rather than being an arbitrary remap:
+ *
+ *   distance <= 0.30  -> 100%  (comfortably the same person)
+ *   distance == 0.45  ->  50%
+ *   distance >= 0.60  ->   0%  (at the same/different decision boundary)
+ */
+const CONFIDENCE_CEILING = 0.30; // distance at/below which confidence reads 100%
+const SAME_PERSON_LIMIT = 0.60;  // distance at which confidence reads 0%
+
+/** Never accept a match looser than this, whatever the confidence gate says. */
+const RECOG_THRESHOLD = 0.55;
+/** A single frame this close confirms immediately — doorway speed. */
+const STRONG_THRESHOLD = 0.35;
+/** Best match must beat the runner-up by this much, to avoid look-alike swaps. */
+const MATCH_MARGIN = 0.06;
+/** A borderline match needs this many good frames agreeing before it fires. */
+const MIN_CONFIRM_FRAMES = 3;
+
+/**
+ * Attendance is only marked at this confidence or above.
+ * On the calibrated scale above, 70% corresponds to a match distance of 0.39 —
+ * comfortably inside same-person territory, and reachable by someone walking
+ * past without posing.
+ */
 export const MIN_CONFIDENCE = 0.7;
 
-/** Map match distance -> confidence. CONFIDENCE_FLOOR or closer reads as ~100%. */
-function confidenceFromDistance(distance: number): number {
+/** Map match distance -> confidence against the calibration above. */
+export function confidenceFromDistance(distance: number): number {
   return Math.max(
     0,
-    Math.min(1, (RECOG_THRESHOLD - distance) / (RECOG_THRESHOLD - CONFIDENCE_FLOOR)),
+    Math.min(1, (SAME_PERSON_LIMIT - distance) / (SAME_PERSON_LIMIT - CONFIDENCE_CEILING)),
   );
+}
+
+/** The match distance a given confidence corresponds to. Used for diagnostics. */
+export function distanceForConfidence(confidence: number): number {
+  return SAME_PERSON_LIMIT - confidence * (SAME_PERSON_LIMIT - CONFIDENCE_CEILING);
 }
 
 let tracks: ActiveTrack[] = [];
@@ -45,11 +82,6 @@ let templates: FaceTemplate[] = [];
 // Seeded from Firestore so a page reload doesn't re-mark everyone.
 const markedMembers = new Set<string>();
 
-/**
- * Load the registered member templates the recogniser matches against.
- * Replaces the prototype's localStorage-backed `updateMatcher()`; the matching
- * maths below is unchanged.
- */
 export function setTemplates(next: FaceTemplate[]) {
   templates = next.filter((t) => t.descriptor.length > 0);
 }
@@ -58,11 +90,6 @@ export function getTemplateCount() {
   return templates.length;
 }
 
-/**
- * Seed the already-marked set from existing attendance records, so members
- * marked earlier in this service (or before a page refresh) are reported as
- * "Already Marked" rather than being marked twice.
- */
 export function seedMarkedMembers(memberDocIds: string[]) {
   markedMembers.clear();
   memberDocIds.forEach((id) => markedMembers.add(id));
@@ -78,13 +105,13 @@ function centerX(points: faceapi.Point[]): number {
 
 /**
  * Score a detection for template suitability: confident, large, and frontal.
- * Shared by registration and walk-through so both learn/match on the same
- * standard of frame.
+ * `quality` ranks frames against each other so the best ones are kept; `good`
+ * is the hard pass/fail gate.
  */
 export function assessDetectionQuality(det: {
   detection: faceapi.FaceDetection;
   landmarks: faceapi.FaceLandmarks68;
-}): { good: boolean; score: number; area: number; frontal: boolean } {
+}): { good: boolean; score: number; area: number; frontal: boolean; quality: number } {
   const score = det.detection.score;
   const box = det.detection.box;
   const area = box.width * box.height;
@@ -94,10 +121,39 @@ export function assessDetectionQuality(det: {
   const nose = det.landmarks.getNose();
   const eyeMidX = (centerX(leftEye) + centerX(rightEye)) / 2;
   const eyeDist = Math.abs(centerX(rightEye) - centerX(leftEye)) || 1;
-  const yaw = (centerX(nose) - eyeMidX) / eyeDist; // 0 = looking straight on
-  const frontal = Math.abs(yaw) < YAW_LIMIT;
+  const yaw = Math.abs((centerX(nose) - eyeMidX) / eyeDist); // 0 = straight on
+  const frontal = yaw < YAW_LIMIT;
 
-  return { good: score >= MIN_SCORE && area >= MIN_AREA && frontal, score, area, frontal };
+  // Rank by size (a closer face carries more detail), tempered by detector
+  // confidence and how square-on the head is. Size is capped so one very close
+  // frame can't dominate purely on scale.
+  const sizeTerm = Math.sqrt(Math.min(area, 60000));
+  const frontalTerm = 1 - Math.min(1, yaw / YAW_LIMIT) * 0.5;
+  const quality = sizeTerm * score * frontalTerm;
+
+  return { good: score >= MIN_SCORE && area >= MIN_AREA && frontal, score, area, frontal, quality };
+}
+
+/**
+ * Add a frame to a track, keeping only the best MAX_SAMPLES.
+ *
+ * This matters more than it looks. Walking towards a camera, the LAST frames
+ * are the best ones — closest and sharpest. A naive "keep the first N" buffer
+ * fills up with the distant early frames and then throws the good ones away,
+ * which is precisely backwards for a doorway.
+ */
+function retainSample(track: ActiveTrack, descriptor: Float32Array, quality: number) {
+  if (track.samples.length < MAX_SAMPLES) {
+    track.samples.push({ descriptor, quality });
+    return;
+  }
+  let worstIdx = 0;
+  for (let i = 1; i < track.samples.length; i++) {
+    if (track.samples[i].quality < track.samples[worstIdx].quality) worstIdx = i;
+  }
+  if (quality > track.samples[worstIdx].quality) {
+    track.samples[worstIdx] = { descriptor, quality };
+  }
 }
 
 function calculateIoU(box1: faceapi.IRect, box2: faceapi.IRect) {
@@ -117,13 +173,40 @@ type Detection = faceapi.WithFaceDescriptor<
   faceapi.WithFaceLandmarks<faceapi.WithFaceDetection<object>>
 >;
 
+/**
+ * Distance from one query embedding to a registered person.
+ *
+ * Takes the better of the mean template and the closest individual enrolment
+ * sample. Averaging cancels noise when the enrolment poses are similar; the
+ * per-sample check rescues the case where the person is walking past at an
+ * angle that matches one enrolment photo but not the average of them all.
+ */
+function distanceToTemplate(query: Float32Array, template: FaceTemplate): number {
+  let best = euclidean(query, template.descriptor);
+  for (const sample of template.samples) {
+    const d = euclidean(query, sample);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
 export function processDetections(
   detections: Detection[],
   onEvent?: (event: RecognitionEvent) => void,
 ) {
   const now = Date.now();
 
-  tracks = tracks.filter((t) => now - t.lastSeenAt < TRACK_TIMEOUT_MS);
+  // Retire stale tracks. A track that ends without ever being confirmed is the
+  // ONLY place an "unknown" verdict is reached — see finaliseTrack.
+  const surviving: ActiveTrack[] = [];
+  for (const track of tracks) {
+    if (now - track.lastSeenAt < TRACK_TIMEOUT_MS) {
+      surviving.push(track);
+    } else {
+      finaliseTrack(track, onEvent);
+    }
+  }
+  tracks = surviving;
 
   const matchedDetections = new Set<number>();
 
@@ -148,16 +231,16 @@ export function processDetections(
       track.lastSeenAt = now;
       track.historySize++;
 
-      // Only accumulate GOOD frames into the template.
       const quality = assessDetectionQuality(detection);
-      if (quality.good && track.descriptors.length < MAX_DESCRIPTORS) {
-        track.descriptors.push(detection.descriptor);
+      if (quality.good) {
+        retainSample(track, detection.descriptor, quality.quality);
         track.bestQualityScore = Math.max(track.bestQualityScore, quality.area);
       }
 
-      // Evaluate every frame; attemptRecognition decides when it's sure enough
-      // (a single strong frame confirms instantly; borderline waits for more).
-      if (!track.isRecognized && track.descriptors.length >= 1) {
+      // Keep evaluating even after a match fires: the confidence reported
+      // should be the best the track ever achieved, not the first value that
+      // happened to clear the bar.
+      if (track.samples.length >= 1) {
         attemptRecognition(track, onEvent);
       }
     }
@@ -170,25 +253,25 @@ export function processDetections(
     const newTrack: ActiveTrack = {
       trackId: `Person #${nextTrackId++}`,
       boundingBox: detection.detection.box,
-      descriptors: quality.good ? [detection.descriptor] : [],
+      samples: [],
       bestQualityScore: quality.area,
       historySize: 1,
       firstSeenAt: now,
       lastSeenAt: now,
       isRecognized: false,
       recognitionFired: false,
+      bestDistance: Infinity,
+      bestMarginOk: false,
     };
+    if (quality.good) retainSample(newTrack, detection.descriptor, quality.quality);
     tracks.push(newTrack);
 
-    // Try to confirm on the very first frame (doorway speed). A crisp, close,
-    // frontal face — or an already-marked member re-crossing — resolves here.
-    if (newTrack.descriptors.length >= 1) {
+    // Try to confirm on the very first frame — a crisp, close, frontal face can
+    // resolve immediately without waiting for the person to walk further in.
+    if (newTrack.samples.length >= 1) {
       attemptRecognition(newTrack, onEvent);
     }
 
-    // Announce a plain DETECTED only if it didn't just resolve, and only for
-    // candidates close/large enough to be a real entrant — so distant faces
-    // and instant re-crossings don't flood the log with phantom detections.
     if (!newTrack.isRecognized && quality.area >= MIN_AREA) {
       onEvent?.({
         timestamp: now,
@@ -205,16 +288,16 @@ export function processDetections(
 function attemptRecognition(track: ActiveTrack, onEvent?: (event: RecognitionEvent) => void) {
   if (templates.length === 0) return;
 
-  // Match the track's AVERAGE embedding against each person's AVERAGE embedding.
-  // Two layers of averaging (per-person at registration, per-track here) makes
-  // the comparison far more stable than a min-of-min over raw frames.
-  const query = meanDescriptor(track.descriptors);
+  // Query embedding: the mean of the best frames retained so far. Because the
+  // buffer keeps the highest-quality frames, this mean improves as the person
+  // approaches rather than being anchored to their distant first sighting.
+  const query = meanDescriptor(track.samples.map((s: TrackSample) => s.descriptor));
 
   let best = { template: null as FaceTemplate | null, dist: Infinity };
   let secondDist = Infinity;
 
   for (const t of templates) {
-    const dist = euclidean(query, t.descriptor);
+    const dist = distanceToTemplate(query, t);
     if (dist < best.dist) {
       secondDist = best.dist;
       best = { template: t, dist };
@@ -223,78 +306,95 @@ function attemptRecognition(track: ActiveTrack, onEvent?: (event: RecognitionEve
     }
   }
 
-  // Must clearly beat the runner-up (or be the only registered member).
   const marginOk = secondDist - best.dist > MATCH_MARGIN;
-  // Confidence gate: nobody is marked below MIN_CONFIDENCE, no matter what the
-  // distance thresholds allow. This is the binding constraint.
+
+  // Remember the best evidence this track has produced, for the final verdict
+  // and for honest confidence reporting.
+  if (best.template && best.dist < track.bestDistance) {
+    track.bestDistance = best.dist;
+    track.bestTemplate = best.template;
+    track.bestMarginOk = marginOk;
+  }
+
   const confidence = confidenceFromDistance(best.dist);
   const confidentEnough = confidence >= MIN_CONFIDENCE;
-  // Fast path: one very close frame is enough to confirm at the doorway.
   const strong = best.dist < STRONG_THRESHOLD && marginOk && confidentEnough;
-  // Slow path: a merely-acceptable match needs several frames of agreement.
   const confirmed =
     best.dist < RECOG_THRESHOLD &&
     marginOk &&
     confidentEnough &&
-    track.descriptors.length >= MIN_CONFIRM_FRAMES;
+    track.samples.length >= MIN_CONFIRM_FRAMES;
 
-  if (best.template && (strong || confirmed)) {
+  if (!best.template || !(strong || confirmed)) return;
+
+  // Keep the on-screen label showing the best confidence achieved.
+  if (!track.isRecognized || confidence > (track.recognizedConfidence ?? 0)) {
     track.isRecognized = true;
     track.recognizedTemplate = best.template;
     track.recognizedConfidence = confidence;
-
-    if (!track.recognitionFired) {
-      track.recognitionFired = true;
-      const identified = best.template;
-
-      // Attendance dedup: mark only the first time this member is seen this
-      // session. Re-acquired tracks still show green, but report "Already
-      // Marked" instead of creating a second attendance record.
-      if (markedMembers.has(identified.memberDocId)) {
-        onEvent?.({
-          timestamp: Date.now(),
-          trackId: track.trackId,
-          type: 'ALREADY_MARKED',
-          message: `${identified.memberName} — already marked`,
-          confidence: track.recognizedConfidence,
-          memberDocId: identified.memberDocId,
-          memberId: identified.memberId,
-          memberName: identified.memberName,
-        });
-      } else {
-        markedMembers.add(identified.memberDocId);
-        onEvent?.({
-          timestamp: Date.now(),
-          trackId: track.trackId,
-          type: 'RECOGNIZED',
-          message: `Matched: ${identified.memberName}`,
-          confidence: track.recognizedConfidence,
-          memberDocId: identified.memberDocId,
-          memberId: identified.memberId,
-          memberName: identified.memberName,
-        });
-      }
-    }
-  } else if (track.descriptors.length >= MAX_DESCRIPTORS) {
-    // Enough good frames and still no confident match -> declare unknown once.
-    if (!track.recognitionFired) {
-      track.recognitionFired = true;
-      track.isRecognized = true; // stop retrying this track
-      // Distinguish a genuine stranger from a registered member we simply
-      // could not confirm to MIN_CONFIDENCE — the operator needs to tell those
-      // apart to decide what to do.
-      const nearMiss = best.template !== null && marginOk && best.dist < RECOG_THRESHOLD;
-      onEvent?.({
-        timestamp: Date.now(),
-        trackId: track.trackId,
-        type: 'UNKNOWN',
-        message: nearMiss
-          ? `Low confidence (${Math.round(confidence * 100)}%) — not marked`
-          : 'Unknown / Not registered',
-        confidence: nearMiss ? confidence : undefined,
-      });
-    }
   }
+
+  if (track.recognitionFired) return;
+  track.recognitionFired = true;
+
+  const identified = best.template;
+  const shared = {
+    timestamp: Date.now(),
+    trackId: track.trackId,
+    confidence,
+    memberDocId: identified.memberDocId,
+    memberId: identified.memberId,
+    memberName: identified.memberName,
+  };
+
+  // Attendance dedup: mark only the first time this member is seen this
+  // session. Re-acquired tracks still show green, but report "Already Marked"
+  // instead of creating a second attendance record.
+  if (markedMembers.has(identified.memberDocId)) {
+    onEvent?.({ ...shared, type: 'ALREADY_MARKED', message: `${identified.memberName} — already marked` });
+  } else {
+    markedMembers.add(identified.memberDocId);
+    onEvent?.({ ...shared, type: 'RECOGNIZED', message: `Matched: ${identified.memberName}` });
+  }
+}
+
+/**
+ * Reach a verdict on a track that has left the frame.
+ *
+ * Deciding "unknown" only at track end is the core walk-through fix. The old
+ * behaviour gave up as soon as the frame buffer filled — which, for someone
+ * still approaching, was exactly when their best frames were about to arrive.
+ * Now a person gets the entire walk to be identified, and is only declared
+ * unknown once they are actually gone.
+ */
+function finaliseTrack(track: ActiveTrack, onEvent?: (event: RecognitionEvent) => void) {
+  if (track.recognitionFired) return;
+  // Never seen well enough to judge — stay silent rather than cry wolf.
+  if (track.samples.length === 0) return;
+
+  track.recognitionFired = true;
+
+  const confidence =
+    track.bestTemplate && track.bestDistance < Infinity
+      ? confidenceFromDistance(track.bestDistance)
+      : 0;
+
+  // Distinguish a genuine stranger from a registered member we simply could not
+  // confirm — the operator needs to tell those apart to decide what to do.
+  const nearMiss =
+    !!track.bestTemplate && track.bestMarginOk && track.bestDistance < RECOG_THRESHOLD;
+
+  onEvent?.({
+    timestamp: Date.now(),
+    trackId: track.trackId,
+    type: 'UNKNOWN',
+    message: nearMiss
+      ? `${track.bestTemplate!.memberName}? — only ${Math.round(confidence * 100)}% confident, not marked`
+      : 'Unknown / Not registered',
+    confidence: nearMiss ? confidence : undefined,
+    memberDocId: nearMiss ? track.bestTemplate!.memberDocId : undefined,
+    memberId: nearMiss ? track.bestTemplate!.memberId : undefined,
+  });
 }
 
 export function getActiveTracks() {

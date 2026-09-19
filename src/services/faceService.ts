@@ -2,9 +2,10 @@
 // recognition log.
 //
 // Privacy note: the 128-D descriptor is a mathematical embedding, not an image.
-// No photograph or video frame is ever stored. The raw per-frame samples are
-// kept in a `samples` subcollection so they are NOT downloaded by the live
-// attendance page, which only needs the averaged template.
+// No photograph or video frame is ever stored. The profile carries the mean
+// template plus a capped set of enrolment samples used for matching; the full
+// raw sample set lives in a `samples` subcollection that the recognition pages
+// never download.
 import {
   collection,
   doc,
@@ -18,6 +19,8 @@ import {
   onSnapshot,
   Timestamp,
   Unsubscribe,
+  QueryDocumentSnapshot,
+  DocumentData,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import type {
@@ -33,14 +36,22 @@ const RECOGNITION_EVENTS = 'recognition_events';
 const SAMPLES_SUBCOLLECTION = 'samples';
 const SAMPLES_DOC = 'data';
 
+/**
+ * How many individual enrolment samples travel with the profile for matching.
+ * Each costs 128 floats (~2.5 KB); 6 covers a realistic spread of registration
+ * poses while keeping the entrance page's initial load small.
+ */
+const MAX_MATCH_SAMPLES = 6;
+
 // ==================== REGISTRATION ====================
 
 /**
  * Register (or re-register) a member's face.
  *
- * Uses the prototype's registration pipeline unchanged: drop near-duplicate
- * frames with selectDiverse(), then average into a single template. Only the
- * storage target differs — Firestore instead of localStorage.
+ * Drops near-duplicate frames with selectDiverse(), then stores both the mean
+ * template and the individual samples. Keeping the samples lets the recogniser
+ * match a walking person against the single closest enrolment pose, not only
+ * against the average of them all.
  */
 export const saveFaceProfile = async (
   member: { id: string; memberId: string; name: string },
@@ -57,11 +68,20 @@ export const saveFaceProfile = async (
 
   const existing = await getDoc(doc(db, FACE_PROFILES, member.id));
 
+  // Individual samples are kept on the profile itself (not just the private
+  // subcollection) because matching now compares against each one as well as
+  // the mean. Capped so the live page's download stays small.
+  const matchSamples = diverse.slice(0, MAX_MATCH_SAMPLES);
+  const flatSamples: number[] = [];
+  matchSamples.forEach((d) => d.forEach((v) => flatSamples.push(v)));
+
   const profile: FaceProfileDoc = {
     memberDocId: member.id,
     memberId: member.memberId,
     memberName: member.name,
     template: Array.from(template),
+    sampleSet: flatSamples,
+    sampleSetCount: matchSamples.length,
     sampleCount: diverse.length,
     registeredAt: existing.exists() ? (existing.data().registeredAt ?? now) : now,
     updatedAt: now,
@@ -104,25 +124,59 @@ export const getRegisteredFaceIds = async (): Promise<Set<string>> => {
 
 /**
  * Load every registered face template for the recogniser.
- * Only the averaged 128-D template is fetched — raw samples stay server-side.
+ * Fetches the mean template plus the capped match samples; the full raw sample
+ * set in the subcollection is never pulled down.
  */
-export const getFaceTemplates = async (): Promise<FaceTemplate[]> => {
-  const snap = await getDocs(collection(db, FACE_PROFILES));
-  return snap.docs
-    .map((d) => {
+/** Parse one face_profiles document. Shared by the load and the live feed. */
+const parseFaceProfile = (d: QueryDocumentSnapshot<DocumentData>): FaceTemplate | null => {
       const data = d.data() as FaceProfileDoc;
       if (!Array.isArray(data.template) || data.template.length !== DESCRIPTOR_SIZE) {
         return null;
       }
+      // Legacy profiles have no sampleSet; they still match on the mean alone.
+      const samples: Float32Array[] = [];
+      if (Array.isArray(data.sampleSet) && data.sampleSet.length >= DESCRIPTOR_SIZE) {
+        const count = Math.floor(data.sampleSet.length / DESCRIPTOR_SIZE);
+        for (let i = 0; i < count; i++) {
+          samples.push(
+            new Float32Array(
+              data.sampleSet.slice(i * DESCRIPTOR_SIZE, (i + 1) * DESCRIPTOR_SIZE),
+            ),
+          );
+        }
+      }
+
       return {
         memberDocId: data.memberDocId ?? d.id,
         memberId: data.memberId,
         memberName: data.memberName,
         descriptor: new Float32Array(data.template),
+        samples,
       } as FaceTemplate;
-    })
-    .filter((t): t is FaceTemplate => t !== null);
 };
+
+export const getFaceTemplates = async (): Promise<FaceTemplate[]> => {
+  const snap = await getDocs(collection(db, FACE_PROFILES));
+  return snap.docs.map(parseFaceProfile).filter((t): t is FaceTemplate => t !== null);
+};
+
+/**
+ * Live registered faces. Lets a second machine recognise someone the moment
+ * they are registered on the first, instead of only after its page reloads.
+ */
+export const subscribeToFaceTemplates = (
+  onUpdate: (templates: FaceTemplate[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe =>
+  onSnapshot(
+    collection(db, FACE_PROFILES),
+    (snap) =>
+      onUpdate(snap.docs.map(parseFaceProfile).filter((t): t is FaceTemplate => t !== null)),
+    (err) => {
+      console.error('Live face template subscription error:', err);
+      onError?.(err);
+    },
+  );
 
 // ==================== LIVE EVENT LOG ====================
 
