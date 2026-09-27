@@ -21,6 +21,22 @@ const RENDER_INTERVAL_MS = 40;
  */
 const AI_YIELD_MS = 16;
 
+/**
+ * Absolute ceiling on how long a box may remain on screen.
+ *
+ * Normally boxes are retired by the "seen in one of the last two passes" rule
+ * below, which needs no timing constant. This is the backstop for the case
+ * that rule cannot catch: if inference stalls completely, both the pass clock
+ * and the track clock freeze together, and boxes would otherwise hang on
+ * screen indefinitely.
+ *
+ * Set well above any realistic pass time. If it were near the pass interval,
+ * a heavily loaded machine — several faces at once on integrated graphics —
+ * would blink boxes off between passes. It costs a second longer to clear a
+ * frozen box after a total stall, which is the right trade.
+ */
+const BOX_CEILING_MS = 2500;
+
 interface FaceCanvasProps {
   stream: MediaStream | null;
   mode: 'registration' | 'recognition';
@@ -81,6 +97,10 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
   >[]>([]);
   const isDetectingRef = useRef(false);
   const lastFaceCountRef = useRef(-1);
+  // Start times of the two most recent completed inference passes. A track is
+  // drawn only if it was matched in one of them.
+  const latestPassAtRef = useRef(0);
+  const previousPassAtRef = useRef(0);
 
   useEffect(() => {
     if (videoRef.current && stream) {
@@ -178,7 +198,24 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
           faceapi.draw.drawDetections(canvas, detections);
         }
       } else {
+        const drawnAt = Date.now();
         latestTracksRef.current.forEach((track) => {
+          // Draw only what the camera can currently see.
+          //
+          // The tracker deliberately keeps a track alive for a couple of
+          // seconds after its last sighting, so a face briefly turning away or
+          // being blocked doesn't restart recognition. That is right for
+          // tracking but wrong for drawing: it left a green box parked over
+          // empty background after the person had walked on.
+          //
+          // The test is "was this track matched in one of the last two
+          // inference passes", which needs no timing constant and so adapts to
+          // however fast this machine happens to be running. Allowing two
+          // passes rather than one keeps a box steady when a face is missed in
+          // a single frame, instead of flickering.
+          if (track.lastSeenAt < previousPassAtRef.current) return;
+          if (drawnAt - track.lastSeenAt > BOX_CEILING_MS) return;
+
           const { x, y, width, height } = track.boundingBox;
           let color = '#3b82f6';
           let label = track.trackId;
@@ -250,10 +287,20 @@ export const FaceCanvas: React.FC<FaceCanvasProps> = ({
             }
           }
         } else {
+          // Stamp the pass before processing, so every track matched in it has
+          // lastSeenAt >= this value.
+          const passAt = Date.now();
           latestTracksRef.current = processDetections(detections, onEventFired);
+          previousPassAtRef.current = latestPassAtRef.current;
+          latestPassAtRef.current = passAt;
         }
       } catch (err) {
         console.error('Face detection error:', err);
+        // Drop the boxes rather than leave the last ones frozen on screen. A
+        // failing pass used to leave stale rectangles painted indefinitely,
+        // because nothing else clears them.
+        latestTracksRef.current = [];
+        latestDetectionsRef.current = [];
       } finally {
         isDetectingRef.current = false;
       }
