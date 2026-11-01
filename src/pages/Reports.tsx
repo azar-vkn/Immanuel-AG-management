@@ -30,6 +30,13 @@ import { CelebrationReport } from '@/components/reports/CelebrationReport';
 import { OverallMemberReport } from '@/components/reports/OverallMemberReport';
 import { useTeams } from '@/contexts/TeamContext';
 
+/** Marked time as "09:14 AM". Blank when absent or when no time was stored. */
+const formatMarkedTime = (markedAt?: string): string => {
+  if (!markedAt) return '';
+  const when = new Date(markedAt);
+  return Number.isNaN(when.getTime()) ? '' : format(when, 'hh:mm a');
+};
+
 const getMemberFellowship = (member: Member): string => {
   if (member.fellowship) return member.fellowship;
   const age = member.dob ? differenceInYears(new Date(), new Date(member.dob)) : 0;
@@ -116,9 +123,19 @@ const Reports: React.FC = () => {
   const reportData = useMemo(() => {
     if (!selectedEventId) return [];
 
-    const eventAttendanceIds = new Set(
-      attendance.filter(a => a.eventId === selectedEventId).map(a => a.memberId)
-    );
+    const eventRecords = attendance.filter(a => a.eventId === selectedEventId);
+    const eventAttendanceIds = new Set(eventRecords.map(a => a.memberId));
+
+    // Earliest mark per member: with duplicate records (the same person caught
+    // on both entrance PCs, say) the first one is when they actually arrived.
+    const markedAtByMember = new Map<string, string>();
+    eventRecords.forEach(a => {
+      if (!a.markedAt) return;
+      const existing = markedAtByMember.get(a.memberId);
+      if (!existing || new Date(a.markedAt) < new Date(existing)) {
+        markedAtByMember.set(a.memberId, a.markedAt);
+      }
+    });
 
     let baseMembers = [];
     switch (reportType) {
@@ -136,12 +153,13 @@ const Reports: React.FC = () => {
     return baseMembers.map(m => ({
       ...m,
       isPresent: eventAttendanceIds.has(m.id),
+      markedAt: markedAtByMember.get(m.id) ?? '',
       derivedFellowship: getMemberFellowship(m)
     }));
   }, [selectedEventId, reportType, eligibleMembers, attendance]);
 
   const handleExport = () => {
-    const headers = ['Member ID', 'Name', 'Tamil Name', 'Phone', 'Tamil Place', 'Tamil City', 'Team', 'Fellowship', 'Member Status', 'Attendance', 'Report'];
+    const headers = ['Member ID', 'Name', 'Tamil Name', 'Phone', 'Tamil Place', 'Tamil City', 'Team', 'Fellowship', 'Member Status', 'Attendance', 'Marked Time', 'Report'];
     const rows = reportData.map(m => [
       m.memberId,
       m.name,
@@ -152,9 +170,12 @@ const Reports: React.FC = () => {
       m.team || '-',
       (m as any).derivedFellowship,
       (m.status || 'regular').replace(/_/g, ' '),
-      reportType === 'all' 
-        ? ((m as any).isPresent ? 'Present' : 'Absent') 
+      reportType === 'all'
+        ? ((m as any).isPresent ? 'Present' : 'Absent')
         : reportType === 'present' ? 'Present' : 'Absent',
+      // Blank for absentees, and for present members on older records that
+      // predate times being stored.
+      formatMarkedTime((m as any).markedAt),
       ''
     ]);
 
@@ -364,6 +385,9 @@ const Reports: React.FC = () => {
                       {reportType === 'all' && (
                         <TableHead className="text-muted-foreground">Status</TableHead>
                       )}
+                      {reportType !== 'absent' && (
+                        <TableHead className="text-muted-foreground">Marked Time</TableHead>
+                      )}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -395,6 +419,11 @@ const Reports: React.FC = () => {
                             >
                               {(member as any).isPresent ? 'Present' : 'Absent'}
                             </Badge>
+                          </TableCell>
+                        )}
+                        {reportType !== 'absent' && (
+                          <TableCell className="text-muted-foreground whitespace-nowrap">
+                            {formatMarkedTime((member as any).markedAt) || '-'}
                           </TableCell>
                         )}
                       </TableRow>

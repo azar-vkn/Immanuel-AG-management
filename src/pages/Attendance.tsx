@@ -14,7 +14,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Search, UserCheck, CheckCircle2, X, Loader2, Users, ScanBarcode, ScanFace, Video } from 'lucide-react';
+import { Search, UserCheck, CheckCircle2, X, Loader2, Users, ScanBarcode, ScanFace, Video, Clock } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { format, differenceInYears } from 'date-fns';
 import { toast } from 'sonner';
@@ -429,8 +429,17 @@ const Attendance: React.FC = () => {
         seenMemberIds.add(item.member!.id);
         return true;
       })
-      .map(item => item.member!);
+      // Keep the time alongside the member. It was already being read for the
+      // sort above, then discarded — the card can show it at no extra cost.
+      .map(item => ({ member: item.member!, markedAt: item.attendance.markedAt }));
   }, [eventAttendance, members]);
+
+  /** Marked time as "09:14 AM". Blank for older records that have no time. */
+  const formatMarkedTime = (markedAt?: string): string => {
+    if (!markedAt) return '';
+    const when = new Date(markedAt);
+    return Number.isNaN(when.getTime()) ? '' : format(when, 'hh:mm a');
+  };
 
   const formatAddress = (member: Member) => {
     const parts = [member.address?.place, member.address?.city, member.address?.district].filter(Boolean);
@@ -500,7 +509,7 @@ const Attendance: React.FC = () => {
                 <UserCheck className="w-5 h-5 text-primary" />
                 Mark Attendance
               </h3>
-              
+
               {/* Face Recognition — marks automatically; barcode and search
                   below continue to work exactly as before. */}
               <div className="mb-5 p-4 rounded-lg bg-primary/5 border border-primary/20">
@@ -782,20 +791,28 @@ const Attendance: React.FC = () => {
               </p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {presentMembers.map(member => (
+                {presentMembers.map(({ member, markedAt }) => (
                   <div
                     key={member.id}
-                    className="flex items-center justify-between p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20"
+                    className="flex items-center justify-between gap-2 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20"
                   >
-                    <div>
-                      <p className="font-medium text-sm">{member.name}</p>
-                      <p className="text-xs text-muted-foreground">{member.memberId}</p>
+                    <div className="min-w-0">
+                      <p className="font-medium text-sm truncate">{member.name}</p>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {member.memberId}
+                        {formatMarkedTime(markedAt) && (
+                          <span className="inline-flex items-center gap-1 ml-2">
+                            <Clock className="w-3 h-3" />
+                            {formatMarkedTime(markedAt)}
+                          </span>
+                        )}
+                      </p>
                     </div>
                     {canMark && (
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        className="h-8 w-8 flex-shrink-0 text-muted-foreground hover:text-destructive"
                         onClick={() => handleRemoveAttendance(member.id)}
                       >
                         <X className="w-4 h-4" />
