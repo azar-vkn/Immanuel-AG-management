@@ -86,6 +86,12 @@ export interface ChurchEvent {
   name: string;
   date: string;
   time?: string;
+  /**
+   * Show the punctuality breakdown for this event on the Dashboard.
+   * Needs `time` to be set, since everything is measured against the start.
+   * Absent on older events, which simply means off.
+   */
+  trackPunctuality?: boolean;
   description?: string;
   fellowships?: FellowshipType[];
   status: EventStatus;

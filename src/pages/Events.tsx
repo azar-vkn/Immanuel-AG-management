@@ -7,6 +7,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
+import { GRACE_MINUTES } from '@/lib/punctuality';
 import {
   Dialog,
   DialogContent,
@@ -14,7 +16,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { Plus, Calendar, Clock, Edit2, Trash2, Loader2, Users, CheckCircle, PlayCircle, XCircle, BarChart3, Repeat } from 'lucide-react';
+import { Plus, Calendar, Clock, Edit2, Trash2, Loader2, Users, CheckCircle, PlayCircle, XCircle, BarChart3, Repeat, Timer } from 'lucide-react';
 import { format, differenceInYears } from 'date-fns';
 import { toast } from 'sonner';
 
@@ -43,6 +45,8 @@ interface EventPreset {
   nameFormat: (dateLabel: string) => string;
   weekday: number;
   fellowships: FellowshipType[];
+  /** Whether this recurring event normally wants a punctuality breakdown. */
+  trackPunctuality: boolean;
 }
 
 const EVENT_PRESETS: EventPreset[] = [
@@ -52,6 +56,8 @@ const EVENT_PRESETS: EventPreset[] = [
     nameFormat: (d) => `Sunday Service(${d})`,
     weekday: 0, // Sunday
     fellowships: [...FELLOWSHIP_OPTIONS],
+    // The main service is the one worth measuring arrival against.
+    trackPunctuality: true,
   },
   {
     id: 'youth_meeting',
@@ -59,6 +65,7 @@ const EVENT_PRESETS: EventPreset[] = [
     nameFormat: (d) => `Youth Meeting (${d})`,
     weekday: 6, // Saturday
     fellowships: ['Youth Boys Fellowship', 'Youth Girls Fellowship'],
+    trackPunctuality: false,
   },
 ];
 
@@ -114,7 +121,8 @@ const Events: React.FC = () => {
     date: '',
     time: '',
     description: '',
-    fellowships: [] as FellowshipType[]
+    fellowships: [] as FellowshipType[],
+    trackPunctuality: false
   });
 
   const canCreate = hasPermission('events.create');
@@ -176,6 +184,7 @@ const Events: React.FC = () => {
       time: readPresetTimes()[preset.id] ?? '',
       description: '',
       fellowships: [...preset.fellowships],
+      trackPunctuality: preset.trackPunctuality,
     });
   };
 
@@ -210,6 +219,13 @@ const Events: React.FC = () => {
       return;
     }
 
+    // Punctuality is measured against the start time, so it cannot be tracked
+    // without one. Caught here rather than silently producing an empty card.
+    if (formData.trackPunctuality && !formData.time) {
+      toast.error('Set a start time to track punctuality');
+      return;
+    }
+
     try {
       if (editingEvent) {
         await updateEvent(editingEvent.id, {
@@ -217,11 +233,12 @@ const Events: React.FC = () => {
           date: formData.date,
           time: formData.time || undefined,
           description: formData.description,
-          fellowships: formData.fellowships
+          fellowships: formData.fellowships,
+          trackPunctuality: formData.trackPunctuality
         });
         setEvents(events.map(ev => 
           ev.id === editingEvent.id 
-            ? { ...ev, name: formData.name, date: formData.date, time: formData.time || undefined, description: formData.description, fellowships: formData.fellowships }
+            ? { ...ev, name: formData.name, date: formData.date, time: formData.time || undefined, description: formData.description, fellowships: formData.fellowships, trackPunctuality: formData.trackPunctuality }
             : ev
         ));
         toast.success('Event updated successfully');
@@ -232,6 +249,7 @@ const Events: React.FC = () => {
           time: formData.time || undefined,
           description: formData.description,
           fellowships: formData.fellowships,
+          trackPunctuality: formData.trackPunctuality,
           status: 'upcoming' as EventStatus,
           createdAt: new Date().toISOString().split('T')[0]
         };
@@ -243,7 +261,7 @@ const Events: React.FC = () => {
         toast.success('Event created successfully');
       }
 
-      setFormData({ name: '', date: '', time: '', description: '', fellowships: [] });
+      setFormData({ name: '', date: '', time: '', description: '', fellowships: [], trackPunctuality: false });
       setEditingEvent(null);
       setShowAddModal(false);
     } catch (error) {
@@ -259,7 +277,8 @@ const Events: React.FC = () => {
       date: event.date,
       time: event.time || '',
       description: event.description || '',
-      fellowships: event.fellowships || []
+      fellowships: event.fellowships || [],
+      trackPunctuality: event.trackPunctuality ?? false
     });
     setShowAddModal(true);
   };
@@ -321,7 +340,7 @@ const Events: React.FC = () => {
             setShowAddModal(open);
             if (!open) {
               setEditingEvent(null);
-              setFormData({ name: '', date: '', time: '', description: '', fellowships: [] });
+              setFormData({ name: '', date: '', time: '', description: '', fellowships: [], trackPunctuality: false });
             }
           }}>
             <DialogTrigger asChild>
@@ -398,6 +417,39 @@ const Events: React.FC = () => {
                     className="bg-secondary/50"
                   />
                 </div>
+                {/* Punctuality tracking. Kept beside Time because it is
+                    measured entirely against the start time. */}
+                <div className="space-y-2 rounded-lg border border-border/50 bg-secondary/30 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <Label
+                        htmlFor="trackPunctuality"
+                        className="flex items-center gap-2 cursor-pointer"
+                      >
+                        <Timer className="w-4 h-4 text-primary" />
+                        Track punctuality
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        Shows on the Dashboard how many were marked before the start,
+                        within {GRACE_MINUTES} minutes, or later.
+                      </p>
+                    </div>
+                    <Switch
+                      id="trackPunctuality"
+                      checked={formData.trackPunctuality}
+                      onCheckedChange={(checked) =>
+                        setFormData({ ...formData, trackPunctuality: checked })
+                      }
+                    />
+                  </div>
+
+                  {formData.trackPunctuality && !formData.time && (
+                    <p className="text-xs text-amber-500">
+                      Set a start time above — punctuality is measured against it.
+                    </p>
+                  )}
+                </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="description">Description</Label>
                   <Textarea

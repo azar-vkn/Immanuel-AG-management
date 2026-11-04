@@ -4,6 +4,8 @@ import { useAuth } from '@/contexts/AuthContext';
 
 import { StatCard } from '@/components/dashboard/StatCard';
 import { BirthdayCard } from '@/components/dashboard/BirthdayCard';
+import { PunctualityCard } from '@/components/dashboard/PunctualityCard';
+import { isPunctualityTracked } from '@/lib/punctuality';
 
 import { getMembers, getEvents, getAttendance } from '@/services/firestore';
 import { getTodaysBirthdays, getTodaysAnniversaries } from '@/services/automationService';
@@ -41,6 +43,10 @@ const Dashboard: React.FC = () => {
 
   // Calculate stats
   const lastEvent = events[0];
+
+  // Most recent event that opted into punctuality tracking. Not necessarily
+  // the latest event — a Youth Meeting in between should not blank the card.
+  const punctualityEvent = events.find(isPunctualityTracked);
   
   // Compute eligible members for the last event (same logic as Reports page)
   const eligibleMembers = (() => {
@@ -165,6 +171,11 @@ const Dashboard: React.FC = () => {
           allMembers={members}
         />
       </div>
+
+      {/* Arrival breakdown, only for events that opted in */}
+      {punctualityEvent && (
+        <PunctualityCard event={punctualityEvent} attendance={attendance} />
+      )}
 
       {/* Quick Actions */}
       <div className="glass rounded-xl p-6 animate-fade-in [animation-delay:500ms]">
