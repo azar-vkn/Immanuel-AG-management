@@ -3,132 +3,22 @@ import * as admin from 'firebase-admin';
 // Initialize Firebase Admin first
 admin.initializeApp();
 
-import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { onDocumentUpdated } from 'firebase-functions/v2/firestore';
-import { sendWishes } from './automations';
-import { sendWhatsAppMessage } from './whatsappApi';
 import { sendAnalyticsEmail, sendTestEmail } from './analyticsEmail';
 
 // ============================================================================
-// SCHEDULED FUNCTIONS (Cron Jobs)
+// Birthday and anniversary wishes are NOT sent from here.
+//
+// They are sent by hand from the Celebration Wishes page, which opens a wa.me
+// link per member in the operator's browser. The Green API automation that
+// used to live here could never run: it required a 'green_api' WhatsApp mode
+// that the app never writes, so both scheduled jobs threw every morning and
+// the error was swallowed. Removed rather than left failing silently.
 // ============================================================================
 
-/**
- * Runs every day at 08:00 AM IST (02:30 AM UTC) to send birthday wishes.
- */
-export const sendDailyBirthdayWishes = onSchedule(
-  {
-    schedule: "30 2 * * *", // 02:30 UTC = 08:00 IST
-    timeZone: "UTC",
-    retryCount: 3,
-  },
-  async (event) => {
-    console.log('Starting scheduled daily birthday wishes...');
-    try {
-      const result = await sendWishes('birthday');
-      console.log(`Finished birthday wishes: ${result.success} sent, ${result.failed} failed, ${result.skipped} skipped.`);
-    } catch (error) {
-      console.error('Scheduled birthday wishes failed:', error);
-    }
-  }
-);
-
-/**
- * Runs every day at 08:05 AM IST (02:35 AM UTC) to send anniversary wishes.
- */
-export const sendDailyAnniversaryWishes = onSchedule(
-  {
-    schedule: "35 2 * * *", // 02:35 UTC = 08:05 IST
-    timeZone: "UTC",
-    retryCount: 3,
-  },
-  async (event) => {
-    console.log('Starting scheduled daily anniversary wishes...');
-    try {
-      const result = await sendWishes('anniversary');
-      console.log(`Finished anniversary wishes: ${result.success} sent, ${result.failed} failed, ${result.skipped} skipped.`);
-    } catch (error) {
-      console.error('Scheduled anniversary wishes failed:', error);
-    }
-  }
-);
-
-
 // ============================================================================
-// HTTPS CALLABLE FUNCTIONS (Triggered from Frontend)
-// ============================================================================
-
-/**
- * Trigger an automation run manually (e.g., from the dashboard "Run Now" button)
- */
-export const triggerAutomation = onCall({ invoker: 'public' }, async (request) => {
-  // Ensure user is authenticated
-  if (!request.auth) {
-    throw new HttpsError('unauthenticated', 'You must be logged in to trigger automations.');
-  }
-
-  const { type, memberId } = request.data;
-
-  if (type !== 'birthday' && type !== 'anniversary') {
-    throw new HttpsError('invalid-argument', 'Invalid automation type. Must be birthday or anniversary.');
-  }
-
-  console.log(`Manual trigger requested for ${type}${memberId ? ` for member ${memberId}` : ''} by user ${request.auth.uid}`);
-
-  try {
-    const result = await sendWishes(type, memberId);
-    return {
-      success: true,
-      data: result
-    };
-  } catch (error) {
-    console.error(`Manual trigger failed for ${type}:`, error);
-    throw new HttpsError('invalid-argument', error instanceof Error ? error.message : 'Unknown error during manual trigger');
-  }
-});
-
-/**
- * Test the WhatsApp API connection credentials
- */
-export const testWhatsAppConnection = onCall({ invoker: 'public' }, async (request) => {
-  // Ensure user is authenticated
-  if (!request.auth) {
-    throw new HttpsError('unauthenticated', 'You must be logged in to test connections.');
-  }
-
-  const { idInstance, apiTokenInstance, testPhone } = request.data;
-
-  if (!idInstance || !apiTokenInstance || !testPhone) {
-    throw new HttpsError('invalid-argument', 'Missing required parameters: idInstance, apiTokenInstance, testPhone');
-  }
-
-  console.log(`Testing WhatsApp connection to ${testPhone}`);
-
-  try {
-    const testMessage = '✅ Test message from Immanuel AG Church Management System.';
-    
-    const result = await sendWhatsAppMessage(
-      idInstance,
-      apiTokenInstance,
-      testPhone,
-      testMessage
-    );
-
-    if (!result.success) {
-      throw new HttpsError('invalid-argument', result.error || 'Failed to send test message');
-    }
-
-    return { success: true, messageId: result.messageId };
-  } catch (error) {
-    console.error('Test connection failed:', error);
-    throw new HttpsError('invalid-argument', error instanceof Error ? error.message : 'Unknown error during test connection');
-  }
-});
-
-
-// ============================================================================
-// ANALYTICS EMAIL FUNCTIONS
+// ANALYTICS EMAIL
 // ============================================================================
 
 /**

@@ -10,14 +10,11 @@ import {
   getUpcomingAnniversaries,
   getTemplateByType,
   createAutomationLog,
-  hasAlreadySentToday,
-  updateAutomation,
   updateTemplate,
 } from '@/services/automationService';
 import { getMembers } from '@/services/firestore';
 import {
   generateMessage,
-  generatePersonalizedGreeting,
   openWhatsApp,
 } from '@/services/whatsappService';
 import { Member, Automation, AutomationLog, AutomationTemplate } from '@/types';
@@ -26,22 +23,11 @@ import { TemplatePreview } from '@/components/automations/TemplatePreview';
 import { LogsTable } from '@/components/automations/LogsTable';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import {
   ArrowLeft,
   Cake,
   Heart,
-  Send,
-  Play,
   Save,
   Eye,
   Loader2,
@@ -50,7 +36,6 @@ import {
   Calendar,
   MessageCircle,
   Users,
-  CheckCircle2,
   Copy,
   MapPin,
   UsersRound,
@@ -69,11 +54,8 @@ const CelebrationWishes: React.FC = () => {
   const [birthdayTemplate, setBirthdayTemplate] = useState<AutomationTemplate | null>(null);
   const [anniversaryTemplate, setAnniversaryTemplate] = useState<AutomationTemplate | null>(null);
   const [activeTab, setActiveTab] = useState<WishTab>('birthday');
-  const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
-  const [showTestDialog, setShowTestDialog] = useState(false);
-  const [testPhone, setTestPhone] = useState('');
 
   // Derived state — show ALL members with today's celebration (matching dashboard count)
   const todayBirthdays = getTodaysBirthdays(members);
@@ -115,7 +97,6 @@ const CelebrationWishes: React.FC = () => {
   };
 
   // Only WhatsApp-eligible members (own phone or family head's) can be sent messages
-  const sendableMembers = todayMembers.filter(isEligibleWithFallback);
   const upcomingMembers = activeTab === 'birthday' ? upcomingBirthdays : upcomingAnniversaries;
 
   useEffect(() => {
@@ -166,37 +147,6 @@ const CelebrationWishes: React.FC = () => {
     }
   };
 
-  const handleTestSend = () => {
-    if (!testPhone || testPhone.trim().length < 10) {
-      toast.error('Please enter a valid phone number');
-      return;
-    }
-    // Create a sample member for personalized greeting test
-    const sampleMember: Member = {
-      id: 'test',
-      memberId: 'TEST001',
-      name: 'சரவணன்',
-      dob: '1990-01-01',
-      gender: 'male',
-      phone: testPhone,
-      address: { place: '', city: '', district: '', state: '', country: '', pincode: '' },
-      familyId: '',
-      isHeadOfFamily: false,
-      relationship: 'Head',
-      maritalStatus: 'married',
-      baptismStatus: 'baptized',
-      churchRole: 'attendee',
-      status: 'regular',
-      createdAt: '',
-      updatedAt: '',
-    };
-    const message = generateMessage(currentTemplateBody, sampleMember, activeTab);
-    openWhatsApp(testPhone, message);
-    toast.success('WhatsApp opened with test message');
-    setShowTestDialog(false);
-    setTestPhone('');
-  };
-
   const handleCopyMessage = async (member: Member) => {
     const message = generateMessage(currentTemplateBody, member, activeTab);
     try {
@@ -224,77 +174,6 @@ const CelebrationWishes: React.FC = () => {
     }
   };
 
-  const handleRunAll = async () => {
-    if (sendableMembers.length === 0) {
-      toast.info(`No eligible members for ${activeTab} wishes today`);
-      return;
-    }
-    setRunning(true);
-    let sentCount = 0;
-    let failedCount = 0;
-
-    try {
-      for (const member of sendableMembers) {
-        const alreadySent = await hasAlreadySentToday(member.id, activeTab);
-        if (alreadySent) {
-          toast.info(`Already sent to ${member.name}, skipping`);
-          continue;
-        }
-        const phone = getEffectivePhone(member);
-        const message = generateMessage(currentTemplateBody, member, activeTab);
-        const success = openWhatsApp(phone, message);
-        await createAutomationLog({
-          automationType: activeTab,
-          memberId: member.id,
-          memberName: member.name,
-          phone,
-          status: success ? 'sent' : 'failed',
-          sentAt: new Date().toISOString(),
-        });
-        if (success) sentCount++;
-        else failedCount++;
-        if (sendableMembers.indexOf(member) < sendableMembers.length - 1) {
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
-
-      // Update automation record
-      const automation = automations.find((a) => a.type === activeTab);
-      if (automation) {
-        const newStatus = failedCount === 0 ? 'success' : sentCount > 0 ? 'partial' : 'failed';
-        await updateAutomation(automation.id, {
-          lastRunAt: new Date().toISOString(),
-          lastRunStatus: newStatus,
-          lastRunSentCount: sentCount,
-          lastRunFailedCount: failedCount,
-        });
-      }
-      toast.success(`${sentCount} sent, ${failedCount} failed`);
-
-      // Refresh logs
-      const updatedLogs = await getAutomationLogs({ limitCount: 15 });
-      setRecentLogs(updatedLogs);
-    } catch (error) {
-      toast.error('Failed to send wishes');
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  const handleToggleAutomation = async (type: WishTab, enabled: boolean) => {
-    const automation = automations.find((a) => a.type === type);
-    if (!automation) return;
-    try {
-      await updateAutomation(automation.id, { enabled });
-      setAutomations((prev) =>
-        prev.map((a) => (a.id === automation.id ? { ...a, enabled } : a))
-      );
-      toast.success(`${type === 'birthday' ? 'Birthday' : 'Anniversary'} wishes ${enabled ? 'enabled' : 'disabled'}`);
-    } catch (error) {
-      toast.error('Failed to update');
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -303,8 +182,6 @@ const CelebrationWishes: React.FC = () => {
     );
   }
 
-  const birthdayAutomation = automations.find((a) => a.type === 'birthday');
-  const anniversaryAutomation = automations.find((a) => a.type === 'anniversary');
 
   return (
     <div className="space-y-6">
@@ -323,25 +200,6 @@ const CelebrationWishes: React.FC = () => {
               <p className="text-sm text-muted-foreground">Send birthday & anniversary wishes via WhatsApp</p>
             </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowTestDialog(true)}
-            className="gap-2 text-xs"
-          >
-            <Send className="w-3.5 h-3.5" />
-            Test Send
-          </Button>
-          <Button
-            onClick={handleRunAll}
-            disabled={running || sendableMembers.length === 0}
-            className="gap-2"
-          >
-            {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-            Send All ({sendableMembers.length})
-          </Button>
         </div>
       </div>
 
@@ -381,31 +239,6 @@ const CelebrationWishes: React.FC = () => {
             </Badge>
           )}
         </button>
-      </div>
-
-      {/* Enable Toggle */}
-      <div className="glass rounded-xl p-4 flex items-center justify-between animate-fade-in [animation-delay:150ms]">
-        <div className="flex items-center gap-3">
-          {activeTab === 'birthday' ? (
-            <Cake className="w-5 h-5 text-pink-400" />
-          ) : (
-            <Heart className="w-5 h-5 text-rose-400" />
-          )}
-          <div>
-            <Label className="text-sm font-medium">
-              {activeTab === 'birthday' ? 'Birthday Wishes' : 'Anniversary Wishes'}
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {activeTab === 'birthday'
-                ? (birthdayAutomation?.enabled ? 'Enabled — ready to send' : 'Disabled')
-                : (anniversaryAutomation?.enabled ? 'Enabled — ready to send' : 'Disabled')}
-            </p>
-          </div>
-        </div>
-        <Switch
-          checked={activeTab === 'birthday' ? birthdayAutomation?.enabled : anniversaryAutomation?.enabled}
-          onCheckedChange={(checked) => handleToggleAutomation(activeTab, checked)}
-        />
       </div>
 
       {/* Today's Celebrations */}
@@ -652,37 +485,6 @@ const CelebrationWishes: React.FC = () => {
         <LogsTable logs={recentLogs} compact maxRows={10} />
       </div>
 
-      {/* Test Send Dialog */}
-      <Dialog open={showTestDialog} onOpenChange={setShowTestDialog}>
-        <DialogContent className="glass max-w-md">
-          <DialogHeader>
-            <DialogTitle className="font-serif">
-              Test Send — {activeTab === 'birthday' ? 'Birthday' : 'Anniversary'}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 pt-2">
-            <div className="space-y-2">
-              <Label>Phone Number</Label>
-              <Input
-                placeholder="Enter phone number (e.g., 9876543210)"
-                value={testPhone}
-                onChange={(e) => setTestPhone(e.target.value)}
-                className="bg-secondary/50"
-              />
-            </div>
-            <div className="p-3 rounded-lg bg-secondary/20 text-xs text-muted-foreground">
-              <p>The message will use "சரவணன்" as a sample name in the template.</p>
-            </div>
-            <div className="flex gap-3 justify-end">
-              <Button variant="outline" onClick={() => setShowTestDialog(false)}>Cancel</Button>
-              <Button onClick={handleTestSend} className="gap-2">
-                <Send className="w-4 h-4" />
-                Send Test
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };
