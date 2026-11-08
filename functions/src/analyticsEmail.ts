@@ -35,7 +35,113 @@ interface EventAnalytics {
   femaleCount: number;
   volunteerCount: number;
   fellowshipBreakdown: Record<string, { registered: number; present: number }>;
+  /** Null unless the event opted into punctuality tracking. */
+  punctuality: PunctualityBreakdown | null;
 }
+
+/** Minutes after a start still counted as "slightly late". Matches the app. */
+const GRACE_MINUTES = 15;
+
+interface ServicePunctuality {
+  label: string;
+  startLabel: string;
+  onTime: number;
+  slightlyLate: number;
+  late: number;
+  measured: number;
+}
+
+interface PunctualityBreakdown {
+  services: ServicePunctuality[];
+  unknownTime: number;
+  totalMarked: number;
+}
+
+/**
+ * Punctuality, deliberately duplicated from src/lib/punctuality.ts.
+ *
+ * Cloud Functions build separately from the browser app and cannot import
+ * across that boundary. The rules must stay in step with that file: measured
+ * against each service start, GRACE_MINUTES window, duplicates collapsed to
+ * the earliest mark, members assigned to the nearer service start.
+ */
+const toLocalDate = (date?: string, time?: string): Date | null => {
+  if (!date || !time) return null;
+  const when = new Date(`${date}T${time}`);
+  return isNaN(when.getTime()) ? null : when;
+};
+
+const getServiceStarts = (event: any): Date[] => {
+  const first = toLocalDate(event.date, event.time);
+  if (!first) return [];
+  const second = toLocalDate(event.date, event.secondServiceTime);
+  return second && second > first ? [first, second] : [first];
+};
+
+const formatStart = (d: Date): string =>
+  d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+const buildPunctuality = (
+  event: any,
+  attendanceDocs: { memberId: string; markedAt?: string }[],
+): PunctualityBreakdown | null => {
+  if (!event.trackPunctuality) return null;
+  const starts = getServiceStarts(event);
+  if (starts.length === 0) return null;
+
+  // Earliest usable mark per member: someone caught by both entrance PCs is
+  // counted once, at the time they actually arrived.
+  const earliest = new Map<string, number | null>();
+  for (const a of attendanceDocs) {
+    const raw = a.markedAt ? new Date(a.markedAt).getTime() : NaN;
+    const usable = isNaN(raw) ? null : raw;
+    if (!earliest.has(a.memberId)) {
+      earliest.set(a.memberId, usable);
+      continue;
+    }
+    const existing = earliest.get(a.memberId) ?? null;
+    if (existing === null || (usable !== null && usable < existing)) {
+      earliest.set(a.memberId, usable);
+    }
+  }
+
+  const multi = starts.length > 1;
+  const services: ServicePunctuality[] = starts.map((start, i) => ({
+    label: multi ? `${i + 1}${i === 0 ? 'st' : 'nd'} service` : 'Service',
+    startLabel: formatStart(start),
+    onTime: 0,
+    slightlyLate: 0,
+    late: 0,
+    measured: 0,
+  }));
+
+  const graceMs = GRACE_MINUTES * 60 * 1000;
+  let unknownTime = 0;
+
+  earliest.forEach((stamp) => {
+    if (stamp === null) {
+      unknownTime++;
+      return;
+    }
+    let idx = 0;
+    let bestGap = Math.abs(stamp - starts[0].getTime());
+    for (let i = 1; i < starts.length; i++) {
+      const gap = Math.abs(stamp - starts[i].getTime());
+      if (gap < bestGap) {
+        bestGap = gap;
+        idx = i;
+      }
+    }
+    const svc = services[idx];
+    const startMs = starts[idx].getTime();
+    svc.measured++;
+    if (stamp < startMs) svc.onTime++;
+    else if (stamp <= startMs + graceMs) svc.slightlyLate++;
+    else svc.late++;
+  });
+
+  return { services, unknownTime, totalMarked: earliest.size };
+};
 
 export const collectEventAnalytics = async (eventId: string): Promise<EventAnalytics> => {
   // Get event
@@ -51,7 +157,8 @@ export const collectEventAnalytics = async (eventId: string): Promise<EventAnaly
   const attendanceSnap = await db.collection('attendance')
     .where('eventId', '==', eventId)
     .get();
-  const attendeeIds = new Set(attendanceSnap.docs.map(d => d.data().memberId));
+  const attendanceRecords = attendanceSnap.docs.map(d => d.data() as { memberId: string; markedAt?: string });
+  const attendeeIds = new Set(attendanceRecords.map(a => a.memberId));
 
   // Filter eligible members
   const eventFellowships: string[] = event.fellowships || [];
@@ -102,6 +209,7 @@ export const collectEventAnalytics = async (eventId: string): Promise<EventAnaly
     femaleCount,
     volunteerCount,
     fellowshipBreakdown,
+    punctuality: buildPunctuality(event, attendanceRecords),
   };
 };
 
@@ -135,6 +243,33 @@ export const generateAnalyticsHTML = (data: EventAnalytics): string => {
                             <td style="padding:12px 16px;border-bottom:1px solid ${BORDER};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:${TEXT_SECONDARY};text-align:center;background-color:${bgColor};">${stats.present}</td>
                             <td style="padding:12px 16px;border-bottom:1px solid ${BORDER};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:${GOLD_DARK};text-align:center;background-color:${bgColor};">${pct}%</td>
                           </tr>`;
+    })
+    .join('');
+
+  // Arrival-time rows, one block per service.
+  const AMBER = '#B26A00';
+  const RED = '#C62828';
+  const punctualityRows = (data.punctuality?.services ?? [])
+    .filter((svc) => svc.measured > 0)
+    .map((svc) => {
+      const pct = (n: number) => (svc.measured > 0 ? Math.round((n / svc.measured) * 100) : 0);
+      const cell = (text: string, color: string, weight: string, align: string, bg: string) =>
+        `<td style="padding:12px 16px;border-bottom:1px solid ${BORDER};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;font-weight:${weight};color:${color};text-align:${align};background-color:${bg};">${text}</td>`;
+      const band = (label: string, count: number, color: string, bg: string) => `
+                          <tr>
+                            ${cell(label, TEXT_PRIMARY, '400', 'left', bg)}
+                            ${cell(String(count), TEXT_SECONDARY, '400', 'center', bg)}
+                            ${cell(pct(count) + '%', color, '600', 'center', bg)}
+                          </tr>`;
+      return `
+                          <tr>
+                            <td colspan="3" style="padding:14px 16px 8px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;color:${TEXT_PRIMARY};background-color:${WHITE};">
+                              ${svc.label} &mdash; starts ${svc.startLabel} &middot; ${svc.measured} marked
+                            </td>
+                          </tr>
+                          ${band('On time', svc.onTime, GREEN, '#FAFAF7')}
+                          ${band('Within ' + GRACE_MINUTES + ' min', svc.slightlyLate, AMBER, WHITE)}
+                          ${band('Late', svc.late, RED, '#FAFAF7')}`;
     })
     .join('');
 
@@ -442,6 +577,51 @@ export const generateAnalyticsHTML = (data: EventAnalytics): string => {
             </td>
           </tr>
 
+          <!-- ============ ARRIVAL TIMES ============ -->
+          ${punctualityRows ? `
+          <!-- Divider -->
+          <tr>
+            <td style="background-color:${WHITE};padding:0 32px;" class="mobile-padding">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr><td style="border-top:1px solid ${BORDER};font-size:1px;line-height:1px;">&nbsp;</td></tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color:${WHITE};padding:24px 32px;" class="mobile-padding">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td style="font-family:Georgia,'Times New Roman',Times,serif;font-size:17px;font-weight:700;color:${TEXT_PRIMARY};padding-bottom:6px;">
+                    Arrival Times
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding-bottom:16px;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="border-bottom:2px solid ${GOLD};width:50px;font-size:1px;line-height:1px;">&nbsp;</td></tr></table>
+                  </td>
+                </tr>
+              </table>
+
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border:1px solid ${BORDER};">
+                <tr>
+                  <td style="padding:10px 16px;background-color:${BG_PAGE};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;font-weight:600;color:${TEXT_SECONDARY};text-transform:uppercase;letter-spacing:0.5px;">When marked</td>
+                  <td style="padding:10px 16px;background-color:${BG_PAGE};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;font-weight:600;color:${TEXT_SECONDARY};text-align:center;text-transform:uppercase;letter-spacing:0.5px;">Members</td>
+                  <td style="padding:10px 16px;background-color:${BG_PAGE};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;font-weight:600;color:${TEXT_SECONDARY};text-align:center;text-transform:uppercase;letter-spacing:0.5px;">Share</td>
+                </tr>
+                ${punctualityRows}
+              </table>
+
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td style="padding-top:10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:11px;color:${TEXT_MUTED};line-height:1.5;">
+                    ${data.punctuality && data.punctuality.unknownTime > 0 ? `${data.punctuality.unknownTime} marked without a recorded time, excluded from the shares above. ` : ''}Based on when each member was marked, which matches arrival closely for the entrance camera and less so for barcode or search.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          ` : ''}
+
           <!-- ============ FELLOWSHIP BREAKDOWN ============ -->
           ${Object.keys(data.fellowshipBreakdown).length > 0 ? `
           <!-- Divider -->
@@ -638,6 +818,16 @@ export const sendTestEmail = async (recipientEmail: string): Promise<{ success: 
       "Men's Fellowship": { registered: 30, present: 25 },
       "Women's Fellowship": { registered: 28, present: 22 },
       'Children': { registered: 15, present: 10 },
+    },
+    // Two services, so the test email previews the layout the church
+    // actually gets rather than a simpler single-service one.
+    punctuality: {
+      services: [
+        { label: '1st service', startLabel: '07:00 AM', onTime: 31, slightlyLate: 9, late: 5, measured: 45 },
+        { label: '2nd service', startLabel: '09:00 AM', onTime: 28, slightlyLate: 12, late: 7, measured: 47 },
+      ],
+      unknownTime: 3,
+      totalMarked: 95,
     },
   };
 

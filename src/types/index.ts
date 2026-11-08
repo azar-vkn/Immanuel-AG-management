@@ -87,6 +87,13 @@ export interface ChurchEvent {
   date: string;
   time?: string;
   /**
+   * Start of a second, back-to-back service covered by this same event.
+   * When set, each member's punctuality is measured against whichever
+   * service they actually came to. Left blank the event behaves as one
+   * service, which is how older events read.
+   */
+  secondServiceTime?: string;
+  /**
    * Show the punctuality breakdown for this event on the Dashboard.
    * Needs `time` to be set, since everything is measured against the start.
    * Absent on older events, which simply means off.

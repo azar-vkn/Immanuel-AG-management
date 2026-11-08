@@ -259,7 +259,13 @@ export const createEvent = async (eventData: Omit<ChurchEvent, 'id'>): Promise<s
   return docRef.id;
 };
 
-export const updateEvent = async (eventId: string, eventData: Partial<ChurchEvent>): Promise<void> => {
+export const updateEvent = async (
+  eventId: string,
+  // FieldValue allows deleteField() for clearing an optional field, which is
+  // the only safe way to remove one: this client has ignoreUndefinedProperties
+  // off, so passing undefined would make Firestore reject the write.
+  eventData: Partial<Record<keyof ChurchEvent, unknown>>,
+): Promise<void> => {
   const docRef = doc(db, COLLECTIONS.EVENTS, eventId);
   await updateDoc(docRef, eventData as DocumentData);
 };

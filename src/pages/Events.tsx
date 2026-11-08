@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getEvents, createEvent, updateEvent, deleteEvent as deleteFirestoreEvent, getMembers, getAttendance } from '@/services/firestore';
+import { deleteField } from 'firebase/firestore';
 import { ChurchEvent, FellowshipType, FELLOWSHIP_OPTIONS, Member, Attendance as AttendanceType, EventStatus } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -71,6 +72,29 @@ const EVENT_PRESETS: EventPreset[] = [
 
 const PRESET_TIME_KEY = 'iag_event_preset_times';
 
+/** Second service start, remembered per preset alongside the first. */
+const PRESET_SECOND_TIME_KEY = 'iag_event_preset_second_times';
+
+const readPresetSecondTimes = (): Record<string, string> => {
+  try {
+    return JSON.parse(localStorage.getItem(PRESET_SECOND_TIME_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+};
+
+const writePresetSecondTime = (presetId: string, time: string) => {
+  try {
+    const next = { ...readPresetSecondTimes() };
+    // Blank clears it, so dropping to one service is remembered too.
+    if (time) next[presetId] = time;
+    else delete next[presetId];
+    localStorage.setItem(PRESET_SECOND_TIME_KEY, JSON.stringify(next));
+  } catch {
+    /* non-fatal */
+  }
+};
+
 /** Remembered start time per preset, so the second one onwards is prefilled. */
 const readPresetTimes = (): Record<string, string> => {
   try {
@@ -122,6 +146,7 @@ const Events: React.FC = () => {
     time: '',
     description: '',
     fellowships: [] as FellowshipType[],
+    secondServiceTime: '',
     trackPunctuality: false
   });
 
@@ -184,6 +209,7 @@ const Events: React.FC = () => {
       time: readPresetTimes()[preset.id] ?? '',
       description: '',
       fellowships: [...preset.fellowships],
+      secondServiceTime: readPresetSecondTimes()[preset.id] ?? '',
       trackPunctuality: preset.trackPunctuality,
     });
   };
@@ -226,19 +252,31 @@ const Events: React.FC = () => {
       return;
     }
 
+    // An out-of-order second service would be silently ignored by the
+    // calculation, so catch the typo here instead.
+    if (formData.secondServiceTime && formData.secondServiceTime <= formData.time) {
+      toast.error('The second service must start after the first');
+      return;
+    }
+
     try {
       if (editingEvent) {
         await updateEvent(editingEvent.id, {
           name: formData.name,
           date: formData.date,
-          time: formData.time || undefined,
+          time: formData.time || deleteField(),
           description: formData.description,
           fellowships: formData.fellowships,
+          // deleteField() rather than undefined: this client has
+          // ignoreUndefinedProperties off, so an undefined value makes
+          // Firestore reject the whole write. It also means clearing the
+          // field actually removes it instead of leaving the old time.
+          secondServiceTime: formData.secondServiceTime || deleteField(),
           trackPunctuality: formData.trackPunctuality
         });
         setEvents(events.map(ev => 
           ev.id === editingEvent.id 
-            ? { ...ev, name: formData.name, date: formData.date, time: formData.time || undefined, description: formData.description, fellowships: formData.fellowships, trackPunctuality: formData.trackPunctuality }
+            ? { ...ev, name: formData.name, date: formData.date, time: formData.time || undefined, description: formData.description, fellowships: formData.fellowships, secondServiceTime: formData.secondServiceTime || undefined, trackPunctuality: formData.trackPunctuality }
             : ev
         ));
         toast.success('Event updated successfully');
@@ -246,9 +284,12 @@ const Events: React.FC = () => {
         const newEventData = {
           name: formData.name,
           date: formData.date,
-          time: formData.time || undefined,
+          ...(formData.time ? { time: formData.time } : {}),
           description: formData.description,
           fellowships: formData.fellowships,
+          ...(formData.secondServiceTime
+            ? { secondServiceTime: formData.secondServiceTime }
+            : {}),
           trackPunctuality: formData.trackPunctuality,
           status: 'upcoming' as EventStatus,
           createdAt: new Date().toISOString().split('T')[0]
@@ -257,11 +298,14 @@ const Events: React.FC = () => {
         setEvents([{ id, ...newEventData }, ...events]);
         // Learn the time for this recurring event so the next one prefills.
         const matched = EVENT_PRESETS.find((p) => formData.name.startsWith(p.label));
-        if (matched) writePresetTime(matched.id, formData.time);
+        if (matched) {
+          writePresetTime(matched.id, formData.time);
+          writePresetSecondTime(matched.id, formData.secondServiceTime);
+        }
         toast.success('Event created successfully');
       }
 
-      setFormData({ name: '', date: '', time: '', description: '', fellowships: [], trackPunctuality: false });
+      setFormData({ name: '', date: '', time: '', description: '', fellowships: [], secondServiceTime: '', trackPunctuality: false });
       setEditingEvent(null);
       setShowAddModal(false);
     } catch (error) {
@@ -278,6 +322,7 @@ const Events: React.FC = () => {
       time: event.time || '',
       description: event.description || '',
       fellowships: event.fellowships || [],
+      secondServiceTime: event.secondServiceTime || '',
       trackPunctuality: event.trackPunctuality ?? false
     });
     setShowAddModal(true);
@@ -340,7 +385,7 @@ const Events: React.FC = () => {
             setShowAddModal(open);
             if (!open) {
               setEditingEvent(null);
-              setFormData({ name: '', date: '', time: '', description: '', fellowships: [], trackPunctuality: false });
+              setFormData({ name: '', date: '', time: '', description: '', fellowships: [], secondServiceTime: '', trackPunctuality: false });
             }
           }}>
             <DialogTrigger asChild>
@@ -447,6 +492,34 @@ const Events: React.FC = () => {
                     <p className="text-xs text-amber-500">
                       Set a start time above — punctuality is measured against it.
                     </p>
+                  )}
+
+                  {formData.trackPunctuality && formData.time && (
+                    <div className="space-y-2 pt-2 border-t border-border/40">
+                      <Label htmlFor="secondServiceTime" className="text-xs">
+                        Second service start (optional)
+                      </Label>
+                      <Input
+                        id="secondServiceTime"
+                        type="time"
+                        value={formData.secondServiceTime}
+                        onChange={(e) =>
+                          setFormData({ ...formData, secondServiceTime: e.target.value })
+                        }
+                        className="bg-secondary/50 max-w-[180px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {formData.secondServiceTime
+                          ? 'Each member is measured against whichever service they came to, split at the midpoint between the two.'
+                          : 'Leave blank for a single service. Set it when two services are marked under this one event.'}
+                      </p>
+                      {formData.secondServiceTime &&
+                        formData.secondServiceTime <= formData.time && (
+                          <p className="text-xs text-amber-500">
+                            The second service must start after the first.
+                          </p>
+                        )}
+                    </div>
                   )}
                 </div>
 
